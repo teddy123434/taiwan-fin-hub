@@ -4,12 +4,12 @@ import {
   activityDisplayAmount,
   activityCashFlow,
   type ActivityFlow,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 export {
   activityDisplayAmount,
   activityCashFlow,
   type ActivityFlow,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 
 export interface ActivityCategorySlice {
   category: string;

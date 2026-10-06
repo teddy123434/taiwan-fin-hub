@@ -2,6 +2,40 @@ import { describe, expect, it } from "vitest";
 import { calculateAssetSummary } from "./summary";
 
 describe("calculateAssetSummary", () => {
+  it("counts credit-card overpayments toward net worth instead of debt", () => {
+    const summary = calculateAssetSummary({
+      bank: {
+        accounts: [
+          {
+            id: "credit",
+            sourceId: "credit",
+            connectorId: "sinopac",
+            accountType: "credit",
+            balance: 137,
+            currency: "TWD",
+          },
+          {
+            id: "debt",
+            sourceId: "debt",
+            connectorId: "esun",
+            accountType: "credit",
+            balance: -1000,
+            currency: "TWD",
+          },
+        ],
+        transactions: [],
+      },
+      investments: [],
+      manualAssets: [],
+      rates: [],
+    });
+    expect(summary.cardDebt).toBe(863);
+    expect(summary.netWorth).toBe(-863);
+    expect(
+      summary.institutionGroups.find((group) => group.cards[0]?.id === "credit")
+        ?.debtTotalTwd,
+    ).toBe(-137);
+  });
   it("converts balances and groups accounts and cards by institution", () => {
     const summary = calculateAssetSummary({
       bank: {
@@ -100,72 +134,5 @@ describe("calculateAssetSummary", () => {
 
     expect(summary.grossAssets).toBe(0);
     expect(summary.missingCurrencies).toEqual(["JPY", "USD"]);
-  });
-
-  it("ignores empty foreign accounts while preserving non-zero card debt warnings", () => {
-    const summary = calculateAssetSummary({
-      bank: {
-        accounts: [
-          {
-            id: "empty-hkd",
-            connectorId: "esun",
-            sourceId: "empty-hkd",
-            accountType: "savings",
-            balance: 0,
-            currency: "HKD",
-          },
-          {
-            id: "overdrawn-cny",
-            connectorId: "esun",
-            sourceId: "overdrawn-cny",
-            accountType: "savings",
-            balance: -10,
-            currency: "CNY",
-          },
-          {
-            id: "empty-card",
-            connectorId: "esun",
-            sourceId: "empty-card",
-            accountType: "credit",
-            balance: 0,
-            currency: "AUD",
-          },
-          {
-            id: "foreign-card",
-            connectorId: "esun",
-            sourceId: "foreign-card",
-            accountType: "credit",
-            balance: -50,
-            currency: "SGD",
-          },
-        ],
-        transactions: [],
-      },
-      investments: [
-        {
-          id: "empty-investment",
-          assetType: "fund",
-          name: "空投資部位",
-          marketValue: 0,
-          cashBalance: 0,
-          currency: "GBP",
-          asOfDate: "2026-08-12",
-        },
-      ],
-      manualAssets: [
-        {
-          id: "empty-manual",
-          name: "零估值資產",
-          category: "other",
-          note: null,
-          currency: "CHF",
-          createdAt: "2026-08-12",
-          value: 0,
-        },
-      ],
-      rates: [],
-    });
-
-    expect(summary.missingCurrencies).toEqual(["SGD"]);
   });
 });

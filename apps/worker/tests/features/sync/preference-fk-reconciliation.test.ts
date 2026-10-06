@@ -1,10 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createTestD1 } from "../../../../../packages/db/testing/d1";
-import {
-  reconcileEsunLifecycleShadowStatements,
-  reconcileSinopacLegacyTransactionStatements,
-  reconcileHncbLegacyTransactionStatements,
-} from "../../../src/features/sync/repository";
+import { createTestD1 } from "../../helpers/d1";
+import { reconcileEsunLifecycleShadowStatements } from "../../../src/sources/esun/repository";
+import { reconcileSinopacLegacyTransactionStatements } from "../../../src/sources/sinopac/repository";
+import { reconcileHncbLegacyTransactionStatements } from "../../../src/sources/hncb/repository";
 
 describe("legacy transaction merges on D1", () => {
   let harness: Awaited<ReturnType<typeof createTestD1>>;

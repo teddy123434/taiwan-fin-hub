@@ -3,7 +3,7 @@ import {
   manualAssets,
   netWorthHistory,
   type AppDatabase,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, asc, eq, sql } from "drizzle-orm";
 
 export type ManualAssetRow = {

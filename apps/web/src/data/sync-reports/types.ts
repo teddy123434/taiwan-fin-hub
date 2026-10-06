@@ -1,1 +1,1 @@
-export type { ScheduledSyncReport } from "@taiwan-fin-hub/core";
+export type { ScheduledSyncReport } from "@taiwan-fin-hub/shared";

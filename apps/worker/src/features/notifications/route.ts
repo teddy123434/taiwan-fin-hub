@@ -1,7 +1,7 @@
 import type {
   NotificationPreferences,
   PushSubscriptionInput,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
 import { z } from "zod";

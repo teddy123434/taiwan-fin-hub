@@ -16,11 +16,11 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const databaseName = process.env.D1_DATABASE ?? "DB";
 const outputPath = join(projectRoot, "docs", "database-schema.md");
-const migrationsPath = join(projectRoot, "packages", "db", "migrations");
+const migrationsPath = join(projectRoot, "apps", "worker", "migrations");
 const metadataPath = join(
   projectRoot,
-  "packages",
-  "db",
+  "apps",
+  "worker",
   "schema-metadata.json",
 );
 const persistencePath = mkdtempSync(join(tmpdir(), "taiwan-fin-hub-schema-"));
@@ -377,9 +377,9 @@ function renderSchema(schemaObjects, migrations, metadataTables) {
     "",
     "> 此文件由 `npm run db:schema:docs` 自動產生，請勿直接編輯。",
     ">",
-    "> Schema 來源是套用 `packages/db/migrations/*.sql` 後的隔離 local D1；不包含任何正式環境資料。",
+    "> Schema 來源是套用 `apps/worker/migrations/*.sql` 後的隔離 local D1；不包含任何正式環境資料。",
     "> Wrangler 管理的 `d1_migrations` metadata table 刻意省略。",
-    "> Table 與欄位的業務語意來自 `packages/db/schema-metadata.json`。",
+    "> Table 與欄位的業務語意來自 `apps/worker/schema-metadata.json`。",
     "",
     "## 目錄",
     "",
@@ -453,14 +453,14 @@ function renderSchema(schemaObjects, migrations, metadataTables) {
     "",
     ...migrations.map(
       (migration) =>
-        `- [\`${migration}\`](../packages/db/migrations/${migration})`,
+        `- [\`${migration}\`](../apps/worker/migrations/${migration})`,
     ),
     "",
     "## 程式碼導覽",
     "",
     "- Feature-specific SQL：`apps/worker/src/features/*/repository.ts`",
-    "- 共用 D1 能力：`packages/db/src/`",
-    "- 共用資料契約：`packages/core/`",
+    "- 共用 D1 能力：`apps/worker/src/db/`",
+    "- 共用資料契約：`shared/`",
     "",
   );
 

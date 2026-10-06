@@ -2,7 +2,7 @@ import type {
   ConnectorId,
   NotificationPreferences,
   SyncNotificationStatus,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 
 export type SyncNotificationEvent = {
   connectorId: ConnectorId;
@@ -26,9 +26,12 @@ const connectorLabels: Record<ConnectorId, string> = {
   ctbc: "中國信託銀行",
   skbank: "新光銀行",
   obank: "王道銀行",
+  nextbank: "將來銀行",
   hncb: "華南銀行",
   kgibank: "凱基銀行",
   firstbank: "第一銀行",
+  megabank: "兆豐銀行",
+  rakuten: "樂天國際銀行",
 };
 
 export function syncNotificationPayload(

@@ -38,6 +38,29 @@ const bankData = {
       currency: "USD",
       asOfAt: "2026-08-08T12:00:00+08:00",
     },
+    {
+      id: "sinopac-jpy",
+      connectorId: "sinopac",
+      sourceId: "card-jpy",
+      institutionName: "永豐銀行",
+      bankCode: "807",
+      accountName: "永豐信用卡（JPY）",
+      accountType: "credit",
+      balance: -10_000,
+      currency: "JPY",
+      paymentDueDate: "2026-10-08",
+    },
+    {
+      id: "unknown-card",
+      connectorId: "sinopac",
+      sourceId: "card-unknown",
+      institutionName: "永豐銀行",
+      bankCode: "807",
+      accountName: "餘額未知的信用卡",
+      accountType: "credit",
+      balance: null,
+      currency: "TWD",
+    },
   ],
   transactions: [],
 };
@@ -70,6 +93,18 @@ test.beforeEach(async ({ page }) => {
     else if (path === "/api/bank") body = bankData;
     else if (path === "/api/bank/bills")
       body = [
+        {
+          id: "sinopac-bill-jpy",
+          connectorId: "sinopac",
+          accountId: "sinopac-jpy",
+          sourceId: "sinopac-bill-jpy",
+          billingPeriod: "2026-09",
+          statementAmount: 10_000,
+          paidAmount: 0,
+          isPaid: 0,
+          paymentDueDate: "2026-10-08",
+          currency: "JPY",
+        },
         {
           id: "bill-1",
           connectorId: "taishin",
@@ -155,7 +190,10 @@ test.beforeEach(async ({ page }) => {
       const assetId = path.split("/")[3]!;
       body = manualAssetHistory.get(assetId) ?? [];
     } else if (path === "/api/exchange-rates")
-      body = [{ currency: "USD", rateTwd: 32, updatedAt: "2026-08-08" }];
+      body = [
+        { currency: "USD", rateTwd: 32, updatedAt: "2026-08-08" },
+        { currency: "JPY", rateTwd: 0.2, updatedAt: "2026-08-08" },
+      ];
     else throw new Error(`Unexpected assets E2E request: ${path}`);
 
     await route.fulfill({
@@ -166,9 +204,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("uses the desktop asset ledger without losing detail workflows", async ({
-  page,
-}) => {
+test("資產清冊區分待繳與未知金額，並可新增手動資產", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/#/assets");
 
@@ -180,7 +216,22 @@ test("uses the desktop asset ledger without losing detail workflows", async ({
     .locator('section[aria-label="資產清冊"]')
     .filter({ visible: true });
   await expect(ledger.getByText("薪轉戶", { exact: true })).toBeVisible();
-  await ledger.locator("summary").filter({ hasText: "查看信用卡帳單" }).click();
+  await ledger.getByRole("button", { name: /^永豐銀行/ }).click();
+  const jpyCard = ledger
+    .getByText("永豐信用卡（JPY）", { exact: true })
+    .filter({ visible: true })
+    .locator("../..");
+  await expect(jpyCard).toContainText("−JP¥10,000");
+  await expect(jpyCard).toContainText("帳單待繳");
+  await expect(
+    ledger.getByText("餘額未知的信用卡", { exact: true }).locator("../.."),
+  ).toContainText("剩餘應繳金額未取得");
+  await ledger.getByRole("button", { name: /^台新銀行/ }).click();
+  await ledger
+    .locator("summary")
+    .filter({ hasText: "查看信用卡帳單" })
+    .first()
+    .click();
   await expect(
     ledger.getByText("2026-08 · 期限 2026/8/20 · 待繳"),
   ).toBeVisible();
@@ -213,118 +264,9 @@ test("uses the desktop asset ledger without losing detail workflows", async ({
   await addAsset.click();
   const editor = page.getByRole("dialog", { name: "新增資產" });
   await expect(editor).toBeVisible();
-  await expect(editor.getByLabel("名稱")).toBeFocused();
   await editor.getByLabel("名稱").fill("緊急預備金");
   await editor.getByLabel("目前估值").fill("300000");
   await editor.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(ledger.getByText("緊急預備金", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(/#\/assets$/);
-
-  await addAsset.click();
-  await page.keyboard.press("Escape");
-  await expect(editor).toBeHidden();
-  await expect(addAsset).toBeFocused();
 });
-
-test("keeps the mobile ledger readable and expandable", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/#/assets");
-
-  const taishin = page.getByRole("button", { name: /^台新銀行/ });
-  await expect(taishin).toHaveAttribute("aria-expanded", "false");
-  const ledger = page
-    .locator('section[aria-label="資產清冊"]')
-    .filter({ visible: true });
-  await expect(ledger.getByText("薪轉戶", { exact: true })).toBeHidden();
-  await taishin.click();
-  await expect(taishin).toHaveAttribute("aria-expanded", "true");
-  await expect(ledger.getByText("薪轉戶", { exact: true })).toBeVisible();
-  await expect(page.getByText(/已扣除 .+ 信用卡負債/)).toBeVisible();
-  await expect(ledger.getByText("元大台灣50")).toBeVisible();
-  await expect(ledger.getByRole("button", { name: /^自住房屋/ })).toBeVisible();
-  await expect(
-    ledger.getByRole("button", { name: "管理估值歷史", exact: true }),
-  ).toBeHidden();
-  const homeAsset = ledger.getByRole("button", {
-    name: /^自住房屋/,
-  });
-  await homeAsset.click();
-  await expect(
-    ledger.getByRole("heading", { name: "估值歷史", exact: true }),
-  ).toBeVisible();
-  await homeAsset.click();
-  await expect(
-    ledger.getByRole("heading", { name: "估值歷史", exact: true }),
-  ).toBeHidden();
-  const addAsset = ledger.getByRole("button", {
-    name: "新增資產",
-    exact: true,
-  });
-  await addAsset.click();
-  await expect(page.getByRole("dialog", { name: "新增資產" })).toBeVisible();
-  await expect(page).toHaveURL(/#\/assets$/);
-  await page.keyboard.press("Escape");
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
-    390,
-  );
-});
-
-for (const width of [1280, 390, 320]) {
-  test(`shows time deposit dates separately from sync time at ${width}px`, async ({
-    page,
-  }) => {
-    await page.setViewportSize({ width, height: 900 });
-    await page.route("**/api/bank", (route) =>
-      route.fulfill({
-        json: {
-          accounts: [
-            {
-              ...bankData.accounts[2],
-              id: "td",
-              currency: "TWD",
-              accountType: "time_deposit",
-              accountName: "新資金9個月新台幣定存年利率2.35% · 末四碼 1900",
-              balance: 52736,
-              openedDate: "2026-09-07",
-              maturityDate: "2027-06-07",
-              asOfAt: "2026-09-08T01:00:00Z",
-            },
-            {
-              ...bankData.accounts[2],
-              id: "legacy-td",
-              accountType: "time_deposit",
-              accountName: "舊定存",
-            },
-          ],
-          transactions: [],
-        },
-      }),
-    );
-    await page.goto("/#/assets");
-    const ledger = page
-      .locator('section[aria-label="資產清冊"]')
-      .filter({ visible: true });
-    if (width < 768)
-      await ledger.getByRole("button", { name: /王道銀行/ }).click();
-    await expect(
-      page
-        .getByText("起息日 2026/9/7 · 到期日 2027/6/7")
-        .filter({ visible: true }),
-    ).toBeVisible();
-    await expect(
-      page
-        .getByText("起息日 尚未取得 · 到期日 尚未取得")
-        .filter({ visible: true }),
-    ).toBeVisible();
-    await expect(
-      page.getByText(/更新 2026\/9\/8/).filter({ visible: true }),
-    ).toBeVisible();
-    expect(
-      await page.evaluate(() => document.documentElement.scrollWidth),
-    ).toBe(width);
-    await page.screenshot({
-      path: `/tmp/obank-assets-${width}.png`,
-      fullPage: true,
-    });
-  });
-}

@@ -1,5 +1,5 @@
-import type { ConnectorId } from "@taiwan-fin-hub/core";
-import { createDrizzle, invoiceLineItems, invoices } from "@taiwan-fin-hub/db";
+import type { ConnectorId } from "@taiwan-fin-hub/shared";
+import { createDrizzle, invoiceLineItems, invoices } from "../../db";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type { MonthDateRange } from "../../platform/month-range";
 

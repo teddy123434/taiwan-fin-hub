@@ -2,11 +2,11 @@ import {
   createDrizzle,
   notificationPreferences,
   pushSubscriptions,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import type {
   NotificationPreferences,
   PushSubscriptionInput,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import { asc, count, eq, sql } from "drizzle-orm";
 
 export type PushSubscriptionRow = {

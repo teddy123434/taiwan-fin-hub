@@ -1,4 +1,4 @@
-import type { ApiErrorResponse } from "@taiwan-fin-hub/core";
+import type { ApiErrorResponse } from "@taiwan-fin-hub/shared";
 
 export interface ApiClient {
   get<T>(path: string): Promise<T>;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { SyncActivityDetailsPage } from "@taiwan-fin-hub/core";
+  import type { SyncActivityDetailsPage } from "@taiwan-fin-hub/shared";
   import {
     formatCurrency,
     formatDate,

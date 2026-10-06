@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { buildActivityItems } from "@taiwan-fin-hub/core";
+  import { buildActivityItems } from "@taiwan-fin-hub/shared";
   import { onMount, tick } from "svelte";
   import { toStore } from "svelte/store";
   import {

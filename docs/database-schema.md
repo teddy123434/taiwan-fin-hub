@@ -2,16 +2,16 @@
 
 > 此文件由 `npm run db:schema:docs` 自動產生，請勿直接編輯。
 >
-> Schema 來源是套用 `packages/db/migrations/*.sql` 後的隔離 local D1；不包含任何正式環境資料。
+> Schema 來源是套用 `apps/worker/migrations/*.sql` 後的隔離 local D1；不包含任何正式環境資料。
 > Wrangler 管理的 `d1_migrations` metadata table 刻意省略。
-> Table 與欄位的業務語意來自 `packages/db/schema-metadata.json`。
+> Table 與欄位的業務語意來自 `apps/worker/schema-metadata.json`。
 
 ## 目錄
 
 - Tables：31
 - Explicit indexes：44
 - Other objects：0
-- Migrations：45
+- Migrations：49
 
 ## Tables
 
@@ -1605,8 +1605,8 @@ CREATE TABLE "tdcc_sync_runs" (
     'queued', 'initializing', 'processing', 'promoting',
     'completed', 'failed', 'needs_user_action'
   )),
-
-
+  -- The run retains the encrypted provider state it was initialized with.
+  -- It is never exposed in an API response or log.
   encrypted_config TEXT,
   encrypted_session TEXT,
   session_json TEXT CHECK (session_json IS NULL OR json_valid(session_json)),
@@ -1634,54 +1634,58 @@ CREATE TABLE "tdcc_sync_runs" (
 
 Migration 是 schema 演進的 source of truth；若要了解某欄位的變更原因，請從對應 migration 檔案與 Git history 追查。
 
-- [`0001_initial.sql`](../packages/db/migrations/0001_initial.sql)
-- [`0002_bank_account_credit.sql`](../packages/db/migrations/0002_bank_account_credit.sql)
-- [`0003_sync_jobs.sql`](../packages/db/migrations/0003_sync_jobs.sql)
-- [`0004_sync_job_defaults.sql`](../packages/db/migrations/0004_sync_job_defaults.sql)
-- [`0005_sinopac_sync_job.sql`](../packages/db/migrations/0005_sinopac_sync_job.sql)
-- [`0006_sinopac_app_json_cleanup.sql`](../packages/db/migrations/0006_sinopac_app_json_cleanup.sql)
-- [`0008_default_sync_schedule.sql`](../packages/db/migrations/0008_default_sync_schedule.sql)
-- [`0009_weekly_sync_weekday.sql`](../packages/db/migrations/0009_weekly_sync_weekday.sql)
-- [`0010_bank_transaction_preferences.sql`](../packages/db/migrations/0010_bank_transaction_preferences.sql)
-- [`0011_classification_rule_actions.sql`](../packages/db/migrations/0011_classification_rule_actions.sql)
-- [`0012_sync_staging_and_query_indexes.sql`](../packages/db/migrations/0012_sync_staging_and_query_indexes.sql)
-- [`0013_invoice_transaction_preferences.sql`](../packages/db/migrations/0013_invoice_transaction_preferences.sql)
-- [`0014_bank_transaction_status.sql`](../packages/db/migrations/0014_bank_transaction_status.sql)
-- [`0015_push_notifications.sql`](../packages/db/migrations/0015_push_notifications.sql)
-- [`0016_scheduled_sync_notification_batches.sql`](../packages/db/migrations/0016_scheduled_sync_notification_batches.sql)
-- [`0017_taishin_sync_job.sql`](../packages/db/migrations/0017_taishin_sync_job.sql)
-- [`0018_esun_credit_transaction_signs.sql`](../packages/db/migrations/0018_esun_credit_transaction_signs.sql)
-- [`0019_rename_other_classification.sql`](../packages/db/migrations/0019_rename_other_classification.sql)
-- [`0020_connector_cursor_secret_cleanup.sql`](../packages/db/migrations/0020_connector_cursor_secret_cleanup.sql)
-- [`0021_ctbc_sync_job.sql`](../packages/db/migrations/0021_ctbc_sync_job.sql)
-- [`0023_disable_unconfigured_sync_jobs.sql`](../packages/db/migrations/0023_disable_unconfigured_sync_jobs.sql)
-- [`0024_manual_asset_currency.sql`](../packages/db/migrations/0024_manual_asset_currency.sql)
-- [`0025_bank_time_deposit.sql`](../packages/db/migrations/0025_bank_time_deposit.sql)
-- [`0026_obank_sync_job.sql`](../packages/db/migrations/0026_obank_sync_job.sql)
-- [`0027_scheduled_sync_reports.sql`](../packages/db/migrations/0027_scheduled_sync_reports.sql)
-- [`0028_einvoice_durable_runs.sql`](../packages/db/migrations/0028_einvoice_durable_runs.sql)
-- [`0029_scheduled_sync_manual_recovery.sql`](../packages/db/migrations/0029_scheduled_sync_manual_recovery.sql)
-- [`0030_hncb_sync_job.sql`](../packages/db/migrations/0030_hncb_sync_job.sql)
-- [`0031_tdcc_durable_runs.sql`](../packages/db/migrations/0031_tdcc_durable_runs.sql)
-- [`0032_tdcc_bank_transaction_identity_cleanup.sql`](../packages/db/migrations/0032_tdcc_bank_transaction_identity_cleanup.sql)
-- [`0033_tdcc_stale_identity_cleanup.sql`](../packages/db/migrations/0033_tdcc_stale_identity_cleanup.sql)
-- [`0034_skbank_sync_job.sql`](../packages/db/migrations/0034_skbank_sync_job.sql)
-- [`0035_tdcc_late_identity_reconciliation.sql`](../packages/db/migrations/0035_tdcc_late_identity_reconciliation.sql)
-- [`0036_firstbank_sync_job.sql`](../packages/db/migrations/0036_firstbank_sync_job.sql)
-- [`0037_activity_time_precision.sql`](../packages/db/migrations/0037_activity_time_precision.sql)
-- [`0038_add_default_classification_categories.sql`](../packages/db/migrations/0038_add_default_classification_categories.sql)
-- [`0039_add_default_classification_rules.sql`](../packages/db/migrations/0039_add_default_classification_rules.sql)
-- [`0040_bank_transaction_day_index.sql`](../packages/db/migrations/0040_bank_transaction_day_index.sql)
-- [`0041_time_deposit_lifecycle.sql`](../packages/db/migrations/0041_time_deposit_lifecycle.sql)
-- [`0042_bank_transaction_lifecycle.sql`](../packages/db/migrations/0042_bank_transaction_lifecycle.sql)
-- [`0043_merge_legacy_invoice_duplicates.sql`](../packages/db/migrations/0043_merge_legacy_invoice_duplicates.sql)
-- [`0044_text_primary_keys_not_null.sql`](../packages/db/migrations/0044_text_primary_keys_not_null.sql)
-- [`0045_preference_foreign_keys.sql`](../packages/db/migrations/0045_preference_foreign_keys.sql)
-- [`0046_transaction_self_foreign_keys.sql`](../packages/db/migrations/0046_transaction_self_foreign_keys.sql)
-- [`0047_sync_activity_details.sql`](../packages/db/migrations/0047_sync_activity_details.sql)
+- [`0001_initial.sql`](../apps/worker/migrations/0001_initial.sql)
+- [`0002_bank_account_credit.sql`](../apps/worker/migrations/0002_bank_account_credit.sql)
+- [`0003_sync_jobs.sql`](../apps/worker/migrations/0003_sync_jobs.sql)
+- [`0004_sync_job_defaults.sql`](../apps/worker/migrations/0004_sync_job_defaults.sql)
+- [`0005_sinopac_sync_job.sql`](../apps/worker/migrations/0005_sinopac_sync_job.sql)
+- [`0006_sinopac_app_json_cleanup.sql`](../apps/worker/migrations/0006_sinopac_app_json_cleanup.sql)
+- [`0008_default_sync_schedule.sql`](../apps/worker/migrations/0008_default_sync_schedule.sql)
+- [`0009_weekly_sync_weekday.sql`](../apps/worker/migrations/0009_weekly_sync_weekday.sql)
+- [`0010_bank_transaction_preferences.sql`](../apps/worker/migrations/0010_bank_transaction_preferences.sql)
+- [`0011_classification_rule_actions.sql`](../apps/worker/migrations/0011_classification_rule_actions.sql)
+- [`0012_sync_staging_and_query_indexes.sql`](../apps/worker/migrations/0012_sync_staging_and_query_indexes.sql)
+- [`0013_invoice_transaction_preferences.sql`](../apps/worker/migrations/0013_invoice_transaction_preferences.sql)
+- [`0014_bank_transaction_status.sql`](../apps/worker/migrations/0014_bank_transaction_status.sql)
+- [`0015_push_notifications.sql`](../apps/worker/migrations/0015_push_notifications.sql)
+- [`0016_scheduled_sync_notification_batches.sql`](../apps/worker/migrations/0016_scheduled_sync_notification_batches.sql)
+- [`0017_taishin_sync_job.sql`](../apps/worker/migrations/0017_taishin_sync_job.sql)
+- [`0018_esun_credit_transaction_signs.sql`](../apps/worker/migrations/0018_esun_credit_transaction_signs.sql)
+- [`0019_rename_other_classification.sql`](../apps/worker/migrations/0019_rename_other_classification.sql)
+- [`0020_connector_cursor_secret_cleanup.sql`](../apps/worker/migrations/0020_connector_cursor_secret_cleanup.sql)
+- [`0021_ctbc_sync_job.sql`](../apps/worker/migrations/0021_ctbc_sync_job.sql)
+- [`0023_disable_unconfigured_sync_jobs.sql`](../apps/worker/migrations/0023_disable_unconfigured_sync_jobs.sql)
+- [`0024_manual_asset_currency.sql`](../apps/worker/migrations/0024_manual_asset_currency.sql)
+- [`0025_bank_time_deposit.sql`](../apps/worker/migrations/0025_bank_time_deposit.sql)
+- [`0026_obank_sync_job.sql`](../apps/worker/migrations/0026_obank_sync_job.sql)
+- [`0027_scheduled_sync_reports.sql`](../apps/worker/migrations/0027_scheduled_sync_reports.sql)
+- [`0028_einvoice_durable_runs.sql`](../apps/worker/migrations/0028_einvoice_durable_runs.sql)
+- [`0029_scheduled_sync_manual_recovery.sql`](../apps/worker/migrations/0029_scheduled_sync_manual_recovery.sql)
+- [`0030_hncb_sync_job.sql`](../apps/worker/migrations/0030_hncb_sync_job.sql)
+- [`0031_tdcc_durable_runs.sql`](../apps/worker/migrations/0031_tdcc_durable_runs.sql)
+- [`0032_tdcc_bank_transaction_identity_cleanup.sql`](../apps/worker/migrations/0032_tdcc_bank_transaction_identity_cleanup.sql)
+- [`0033_tdcc_stale_identity_cleanup.sql`](../apps/worker/migrations/0033_tdcc_stale_identity_cleanup.sql)
+- [`0034_skbank_sync_job.sql`](../apps/worker/migrations/0034_skbank_sync_job.sql)
+- [`0035_tdcc_late_identity_reconciliation.sql`](../apps/worker/migrations/0035_tdcc_late_identity_reconciliation.sql)
+- [`0036_firstbank_sync_job.sql`](../apps/worker/migrations/0036_firstbank_sync_job.sql)
+- [`0037_activity_time_precision.sql`](../apps/worker/migrations/0037_activity_time_precision.sql)
+- [`0038_add_default_classification_categories.sql`](../apps/worker/migrations/0038_add_default_classification_categories.sql)
+- [`0039_add_default_classification_rules.sql`](../apps/worker/migrations/0039_add_default_classification_rules.sql)
+- [`0040_bank_transaction_day_index.sql`](../apps/worker/migrations/0040_bank_transaction_day_index.sql)
+- [`0041_time_deposit_lifecycle.sql`](../apps/worker/migrations/0041_time_deposit_lifecycle.sql)
+- [`0042_bank_transaction_lifecycle.sql`](../apps/worker/migrations/0042_bank_transaction_lifecycle.sql)
+- [`0043_merge_legacy_invoice_duplicates.sql`](../apps/worker/migrations/0043_merge_legacy_invoice_duplicates.sql)
+- [`0044_text_primary_keys_not_null.sql`](../apps/worker/migrations/0044_text_primary_keys_not_null.sql)
+- [`0045_preference_foreign_keys.sql`](../apps/worker/migrations/0045_preference_foreign_keys.sql)
+- [`0046_transaction_self_foreign_keys.sql`](../apps/worker/migrations/0046_transaction_self_foreign_keys.sql)
+- [`0047_sync_activity_details.sql`](../apps/worker/migrations/0047_sync_activity_details.sql)
+- [`0048_kgibank_sync_job.sql`](../apps/worker/migrations/0048_kgibank_sync_job.sql)
+- [`0049_megabank_sync_job.sql`](../apps/worker/migrations/0049_megabank_sync_job.sql)
+- [`0050_nextbank_sync_job.sql`](../apps/worker/migrations/0050_nextbank_sync_job.sql)
+- [`0051_rakuten_sync_job.sql`](../apps/worker/migrations/0051_rakuten_sync_job.sql)
 
 ## 程式碼導覽
 
 - Feature-specific SQL：`apps/worker/src/features/*/repository.ts`
-- 共用 D1 能力：`packages/db/src/`
-- 共用資料契約：`packages/core/`
+- 共用 D1 能力：`apps/worker/src/db/`
+- 共用資料契約：`shared/`

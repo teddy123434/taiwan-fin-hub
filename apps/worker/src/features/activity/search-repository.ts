@@ -1,4 +1,4 @@
-import { createDrizzle } from "@taiwan-fin-hub/db";
+import { createDrizzle } from "../../db";
 import { sql } from "drizzle-orm";
 
 export interface ActivitySearchInput {

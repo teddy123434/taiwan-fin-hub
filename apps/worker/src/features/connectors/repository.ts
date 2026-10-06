@@ -1,8 +1,5 @@
-import type { ConnectorId } from "@taiwan-fin-hub/core";
-import {
-  getConnectorSettings,
-  upsertConnectorSettings,
-} from "@taiwan-fin-hub/db";
+import type { ConnectorId } from "@taiwan-fin-hub/shared";
+import { getConnectorSettings, upsertConnectorSettings } from "../../db";
 
 export function findConnectorSettings(
   db: D1Database,

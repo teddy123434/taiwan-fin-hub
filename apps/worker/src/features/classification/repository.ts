@@ -3,7 +3,7 @@ import {
   classificationCategories as categories,
   classificationOverrides as overrides,
   classificationRules as rules,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, desc, eq, sql } from "drizzle-orm";
 
 export type ClassificationOverrideRow = Awaited<

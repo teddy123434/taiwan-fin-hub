@@ -12,11 +12,12 @@ import { netWorthRoutes } from "./features/net-worth/route";
 import { notificationRoutes } from "./features/notifications/route";
 import { ocrRoutes } from "./features/ocr/route";
 import { syncRoutes } from "./features/sync/route";
-import { syncScheduleRoutes } from "./features/sync/schedule-route";
+import { syncReportRoutes } from "./features/sync/reports/route";
+import { syncScheduleRoutes } from "./features/sync/scheduling/route";
 import {
   consumeScheduledSyncQueue,
   enqueueScheduledSync,
-} from "./features/sync/scheduler-queue";
+} from "./features/sync/scheduling/queue";
 import { accessMiddleware } from "./middleware/access";
 import { connectorContextMiddleware } from "./middleware/connector-context";
 import type { Env, ScheduledSyncQueueMessage } from "./platform/env";
@@ -44,6 +45,7 @@ api.route("/", netWorthRoutes);
 api.route("/", notificationRoutes);
 api.route("/", connectorRoutes);
 api.route("/", syncScheduleRoutes);
+api.route("/", syncReportRoutes);
 api.route("/", syncRoutes);
 
 api.onError(apiErrorResponse);

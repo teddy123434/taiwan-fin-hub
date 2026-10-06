@@ -5,7 +5,7 @@ import {
   bankTransactionPreferences,
   bankTransactions,
   creditCardBills,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { TransactionPageCursor } from "../investments/repository";

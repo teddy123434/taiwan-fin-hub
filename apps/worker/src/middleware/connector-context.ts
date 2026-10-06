@@ -1,4 +1,4 @@
-import { isConnectorId } from "@taiwan-fin-hub/core";
+import { isConnectorId } from "@taiwan-fin-hub/shared";
 import { honoFactory } from "../platform/hono";
 
 export const connectorContextMiddleware = honoFactory.createMiddleware(

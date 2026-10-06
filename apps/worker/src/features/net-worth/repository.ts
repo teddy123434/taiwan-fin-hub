@@ -5,7 +5,7 @@ import {
   exchangeRates,
   manualAssets,
   netWorthHistory,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 

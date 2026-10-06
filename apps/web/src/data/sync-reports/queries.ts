@@ -1,7 +1,7 @@
 import type {
   ScheduledSyncReport,
   SyncReportActivities,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import { queryOptions } from "@tanstack/svelte-query";
 import type { ApiClient } from "@/shared/api/client";
 import { queryKeys } from "@/shared/api/query-keys";

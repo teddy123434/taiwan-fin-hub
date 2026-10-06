@@ -1,6 +1,6 @@
-import { parseConnectorConfig } from "@taiwan-fin-hub/connectors";
-import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/core";
-import { clearConnectorCursor } from "@taiwan-fin-hub/db";
+import { parseConnectorConfig } from "../../sources/config-registry";
+import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/shared";
+import { clearConnectorCursor } from "../../db";
 import { configEncryptionKey } from "../../platform/config";
 import { decryptJson, encryptJson } from "../../platform/crypto";
 import type { Env } from "../../platform/env";

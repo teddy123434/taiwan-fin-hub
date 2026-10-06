@@ -2,7 +2,7 @@ import {
   createDrizzle,
   investmentPositions,
   investmentTransactions,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type { MonthDateRange } from "../../platform/month-range";
 

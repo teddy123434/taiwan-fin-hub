@@ -1,4 +1,8 @@
 import type { Hono } from "hono";
+import type {
+  BankDataResponse,
+  CreditCardBillResponse,
+} from "@taiwan-fin-hub/shared";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import type { AppBindings } from "../../platform/env";
@@ -45,7 +49,10 @@ function registerBankRoutes(api: Hono<AppBindings>) {
     ),
     async (c) => {
       const range = resolveMonthDateRange(c.req.valid("query"));
-      if (range) return c.json(await getBankRange(c.env.DB, range));
+      if (range)
+        return c.json(
+          (await getBankRange(c.env.DB, range)) satisfies BankDataResponse,
+        );
 
       const { limit, cursor } = parseKeysetPagination(
         c.req.query(),
@@ -67,7 +74,7 @@ function registerBankRoutes(api: Hono<AppBindings>) {
       return c.json({
         accounts: page.accounts,
         transactions: page.transactions,
-      });
+      } satisfies BankDataResponse);
     },
   );
 
@@ -80,7 +87,13 @@ function registerBankRoutes(api: Hono<AppBindings>) {
     ),
     async (c) => {
       const range = resolveMonthDateRange(c.req.valid("query"));
-      if (range) return c.json(await getCreditCardBillsRange(c.env.DB, range));
+      if (range)
+        return c.json(
+          (await getCreditCardBillsRange(
+            c.env.DB,
+            range,
+          )) satisfies CreditCardBillResponse[],
+        );
 
       const { limit, cursor } = parseKeysetPagination(
         c.req.query(),
@@ -99,7 +112,7 @@ function registerBankRoutes(api: Hono<AppBindings>) {
               })
             : undefined,
       });
-      return c.json(page.bills);
+      return c.json(page.bills satisfies CreditCardBillResponse[]);
     },
   );
 }

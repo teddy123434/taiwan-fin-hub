@@ -2,7 +2,7 @@ import type {
   NotificationConfig,
   NotificationPreferences,
   PushSubscriptionInput,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 
 export type {
   NotificationConfig,

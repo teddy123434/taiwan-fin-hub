@@ -1,4 +1,4 @@
-import type { ConnectorId } from "@taiwan-fin-hub/core";
+import type { ConnectorId } from "@taiwan-fin-hub/shared";
 
 export interface InvestmentRow {
   id: string;

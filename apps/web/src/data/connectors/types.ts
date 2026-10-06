@@ -1,6 +1,6 @@
-import type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/core";
+import type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/shared";
 
-export type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/core";
+export type { ConnectorId, QueuedSyncResponse } from "@taiwan-fin-hub/shared";
 
 export type SyncTarget = "default" | "investments" | "bank" | "trades";
 
@@ -37,6 +37,10 @@ export interface SyncJobRow {
   lastError: string | null;
   updatedAt: string;
   running: boolean;
+  runId: string | null;
+  phase: string | null;
+  lastProgressAt: string | null;
+  retryAfterSeconds: number;
 }
 
 export interface SyncScheduleSettings {

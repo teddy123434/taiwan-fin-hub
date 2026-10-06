@@ -1,4 +1,4 @@
-import { createDrizzle, exchangeRates } from "@taiwan-fin-hub/db";
+import { createDrizzle, exchangeRates } from "../../db";
 import { inArray, sql } from "drizzle-orm";
 
 export type ExchangeRateRow = Pick<

@@ -10,4 +10,4 @@ export {
   formatActivityDateGroup,
   activityStatusLabel,
   type ActivityDateGroup,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";

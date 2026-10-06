@@ -28,7 +28,7 @@ binding = "DB"
 database_name = "taiwan-fin-hub-teddy"
 # database_id is intentionally omitted from this public configuration.
 # Cloudflare automatically provisions or resolves the D1 binding on deploy.
-migrations_dir = "packages/db/migrations"
+migrations_dir = "apps/worker/migrations"
 
 [observability]
 enabled = true

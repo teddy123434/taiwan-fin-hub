@@ -1,4 +1,4 @@
-import type { ConnectorId } from "@taiwan-fin-hub/core";
+import type { ConnectorId } from "@taiwan-fin-hub/shared";
 
 const ESUN_BANK_CODE = "808";
 const CATHAYBK_BANK_CODE = "013";
@@ -7,7 +7,9 @@ const SKBANK_BANK_CODE = "103";
 const OBANK_BANK_CODE = "048";
 const HNCB_BANK_CODE = "008";
 const KGIBANK_BANK_CODE = "809";
+const RAKUTEN_BANK_CODE = "826";
 const FIRSTBANK_BANK_CODE = "007";
+const MEGABANK_BANK_CODE = "017";
 const TAIWAN_BANK_NAMES: Record<string, string> = {
   "004": "台灣銀行",
   "005": "土地銀行",
@@ -95,6 +97,14 @@ export function deriveBankMatchKey(
     const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
     return { bankCode: KGIBANK_BANK_CODE, last4: last4 || null };
   }
+  if (connectorId === "megabank" && sourceId.startsWith("bank:megabank:")) {
+    const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
+    return { bankCode: MEGABANK_BANK_CODE, last4: last4 || null };
+  }
+  if (connectorId === "rakuten" && sourceId.startsWith("bank:rakuten:")) {
+    const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
+    return { bankCode: RAKUTEN_BANK_CODE, last4: last4 || null };
+  }
   const match = sourceId.match(/^settlement:([^:]+):([^:]+)/);
   const last4 = match?.[2]?.replace(/\D/g, "").slice(-4) ?? "";
   return match
@@ -136,7 +146,11 @@ function normalizeDepositDisplay<T extends BankDisplayRow>(row: T): T {
                   ? HNCB_BANK_CODE
                   : row.connectorId === "kgibank"
                     ? KGIBANK_BANK_CODE
-                    : undefined);
+                    : row.connectorId === "megabank"
+                      ? MEGABANK_BANK_CODE
+                      : row.connectorId === "rakuten"
+                        ? RAKUTEN_BANK_CODE
+                        : undefined);
   const accountSuffix = accountSuffixFromSourceId(sourceId);
   return {
     ...row,
@@ -176,6 +190,10 @@ function parseBankAccountSource(sourceId: string): {
   if (hncb) return { bankCode: HNCB_BANK_CODE, account: hncb[1] };
   const kgibank = sourceId.match(/^bank:kgibank:([^:]+)/);
   if (kgibank) return { bankCode: KGIBANK_BANK_CODE, account: kgibank[1] };
+  const megabank = sourceId.match(/^bank:megabank:([^:]+)/);
+  if (megabank) return { bankCode: MEGABANK_BANK_CODE, account: megabank[1] };
+  const rakuten = sourceId.match(/^bank:rakuten:([^:]+)/);
+  if (rakuten) return { bankCode: RAKUTEN_BANK_CODE, account: rakuten[1] };
   return {};
 }
 

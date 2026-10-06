@@ -1,14 +1,14 @@
 import {
   captureStagedActivityBefore,
   captureStagedActivityAfter,
-} from "./activity-capture";
+} from "./reports/activity-capture";
 import {
   createDrizzle,
   sanitizeDatabaseError,
   syncWriteStaging,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { eq, lt } from "drizzle-orm";
-import type { SyncNewRecordCounts } from "@taiwan-fin-hub/core";
+import type { ConnectorId, SyncNewRecordCounts } from "@taiwan-fin-hub/shared";
 
 export type SyncEntityType =
   | "invoice"
@@ -25,6 +25,11 @@ export type SyncWriteRecord = {
   entityType: SyncEntityType;
   recordKey: string;
   payload: Record<string, unknown>;
+};
+
+type SettingsGuard = {
+  connectorId: ConnectorId;
+  encryptedConfig: string;
 };
 
 type EntityConfig = {
@@ -381,6 +386,7 @@ export async function promoteStagedSyncWrite(
   input: {
     runId: string;
     entityTypes: readonly SyncEntityType[];
+    settingsGuard?: SettingsGuard;
     beforePromoteStatements?: D1PreparedStatement[];
     afterPromoteStatements?: D1PreparedStatement[];
     finalizeStatements?: D1PreparedStatement[];
@@ -400,11 +406,31 @@ export async function promoteStagedSyncWrite(
         entityType as keyof typeof NEW_RECORD_ENTITIES,
       ),
     }));
-  const countResultOffset = input.beforePromoteStatements?.length ?? 0;
+  const beforePromoteStatements = [
+    ...(input.settingsGuard
+      ? [
+          db
+            .prepare(
+              `DELETE FROM sync_write_staging
+               WHERE run_id = ? AND NOT EXISTS (
+                 SELECT 1 FROM connector_settings
+                 WHERE connector_id = ? AND encrypted_config = ?
+               )`,
+            )
+            .bind(
+              input.runId,
+              input.settingsGuard.connectorId,
+              input.settingsGuard.encryptedConfig,
+            ),
+        ]
+      : []),
+    ...(input.beforePromoteStatements ?? []),
+  ];
+  const countResultOffset = beforePromoteStatements.length;
   // 保留整組原生 D1 batch：跨檔案 factories、計數 offset、promotion、
   // lifecycle reconciliation、finalize/cursor 與 cleanup 必須維持順序及同一原子邊界。
   const batchResults = await db.batch([
-    ...(input.beforePromoteStatements ?? []),
+    ...beforePromoteStatements,
     ...newRecordCountStatements.map(({ statement }) => statement),
     ...captureStagedActivityBefore(
       db,
@@ -437,6 +463,7 @@ export async function persistStagedSyncWrite(
   db: D1Database,
   input: {
     records: SyncWriteRecord[];
+    settingsGuard?: SettingsGuard;
     beforePromoteStatements?: D1PreparedStatement[];
     afterPromoteStatements?: D1PreparedStatement[];
     finalizeStatements?: D1PreparedStatement[];
@@ -461,6 +488,7 @@ export async function persistStagedSyncWrite(
     return await promoteStagedSyncWrite(db, {
       runId,
       entityTypes: input.records.map((record) => record.entityType),
+      settingsGuard: input.settingsGuard,
       beforePromoteStatements: input.beforePromoteStatements,
       afterPromoteStatements: input.afterPromoteStatements,
       finalizeStatements: input.finalizeStatements,

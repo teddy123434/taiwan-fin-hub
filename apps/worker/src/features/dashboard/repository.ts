@@ -4,7 +4,7 @@ import {
   bankBalanceSnapshots,
   investmentPositions,
   invoices,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, isNull, sql } from "drizzle-orm";
 
 export async function loadDashboardSummary(db: D1Database) {

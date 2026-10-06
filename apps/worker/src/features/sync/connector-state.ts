@@ -1,4 +1,4 @@
-import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/core";
+import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/shared";
 
 export function parsePublicConnectorConfig(
   connectorId: ConnectorId,

@@ -1,5 +1,5 @@
 import type { MiddlewareHandler } from "hono";
-import { sanitizeDatabaseError } from "@taiwan-fin-hub/db";
+import { sanitizeDatabaseError } from "../db";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { AppBindings, Env } from "./env";

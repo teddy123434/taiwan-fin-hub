@@ -98,8 +98,7 @@
   );
   const cardDebt = $derived(
     cards.reduce(
-      (sum, account) =>
-        sum + Math.abs(toTwd(account.balance ?? 0, account.currency)),
+      (sum, account) => sum - toTwd(account.balance ?? 0, account.currency),
       0,
     ),
   );
@@ -343,7 +342,11 @@
         {formatCurrency(netWorth)}
       </p>
       <p class="mt-3 text-caption text-subtle">
-        已扣除 {formatCurrency(cardDebt)} 信用卡負債
+        {#if cardDebt < 0}
+          已計入 {formatCurrency(-cardDebt)} 信用卡溢繳餘額
+        {:else}
+          已扣除 {formatCurrency(cardDebt)} 信用卡負債
+        {/if}
       </p>
       <div class="mt-6 grid grid-cols-3 gap-3 md:gap-6">
         {#each allocation as item (item.label)}

@@ -22,4 +22,4 @@ binding = "DB"
 database_name = "taiwan-fin-hub"
 database_id = "<YOUR_D1_DATABASE_ID>"
 remote = true
-migrations_dir = "../../packages/db/migrations"
+migrations_dir = "migrations"

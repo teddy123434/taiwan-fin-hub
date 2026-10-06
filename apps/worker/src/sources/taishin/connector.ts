@@ -1,0 +1,1518 @@
+import type { SyncResult } from "../types";
+import {
+  BrowserRunCapacityError,
+  launchBrowserWithRetry,
+  connectBrowserWithCancellation,
+} from "../browser.js";
+import puppeteer, {
+  type Browser,
+  type Frame,
+  type Page,
+  type HTTPRequest,
+  type HTTPResponse,
+} from "@cloudflare/puppeteer";
+import { BANK_SYNC_MONTHS } from "../sync-window";
+import { isNoCreditCardMessage } from "../credit-card-status";
+import {
+  parseTaishinCreditCardData,
+  type TaishinConfig,
+  type TaishinCreditCardPayloads,
+} from "./protocol";
+
+const RWD_URL = "https://my.taishinbank.com.tw/TIBNetBank/svc/rwd/index.html";
+const API_ROOT = "/TIBNetBank/svc";
+const SESSION_CHECK_PATH = `${API_ROOT}/web/common/sessioncheck`;
+const SUMMARY_PATH = `${API_ROOT}/web4/rb0708rwd/doXTPA`;
+const OVERVIEW_PATH = `${API_ROOT}/web4/rb0760/getCardOverviewData`;
+const BILL_PATH = `${API_ROOT}/web4/rb0708rwd/init`;
+const REALTIME_PATH = `${API_ROOT}/web4/rb0708rwd/qryRealTime`;
+export const TAISHIN_AUTO_LOGIN_ATTEMPTS = 3;
+const TAISHIN_AUTO_OCR_ATTEMPTS = 6;
+const CAPTCHA_KEEP_ALIVE_MS = 150_000;
+const CAPTCHA_VALIDITY_MS = 120_000;
+const CAPTCHA_IMAGE_TIMEOUT_MS = 10_000;
+const CAPTCHA_PAGE_RETRY_ATTEMPTS = 1;
+const LOGIN_RESULT_ATTEMPTS = 10;
+const LOGIN_RESULT_POLL_MS = 500;
+const REQUIRED_API_TIMEOUT_MS = 8_000;
+const OPTIONAL_API_TIMEOUT_MS = 4_000;
+const REALTIME_RETRY_ATTEMPTS = 3;
+const USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UP1A.231105.003) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+
+type JsonRecord = Record<string, unknown>;
+type BrowserPage = Page | Frame;
+type SessionCheckDiagnostic = {
+  result?: string;
+  httpStatus?: number;
+  isJson?: boolean;
+  timedOut?: boolean;
+  validJson?: boolean;
+  hasApiError?: boolean;
+  expired?: boolean;
+  hasSessionId?: boolean;
+  checkFailed?: boolean;
+};
+export type TaishinSyncStage =
+  | "acquire_browser"
+  | "initialize_browser_page"
+  | "configure_browser_page"
+  | "restore_session"
+  | "login"
+  | "fetch_realtime"
+  | "fetch_summary"
+  | "fetch_current_bill"
+  | "fetch_historical_bills"
+  | "parse_payload"
+  | "export_session";
+
+const TAISHIN_SYNC_STAGE_LABELS: Record<TaishinSyncStage, string> = {
+  acquire_browser: "啟動瀏覽器",
+  initialize_browser_page: "初始化瀏覽器頁面",
+  configure_browser_page: "設定瀏覽器頁面",
+  restore_session: "還原登入 session",
+  login: "登入台新網銀",
+  fetch_realtime: "取得即時消費",
+  fetch_summary: "取得信用卡摘要",
+  fetch_current_bill: "取得本期帳單",
+  fetch_historical_bills: "取得歷史帳單",
+  parse_payload: "解析信用卡資料",
+  export_session: "保存登入 session",
+};
+
+export class TaishinVerificationRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaishinVerificationRequiredError";
+  }
+}
+
+export class TaishinCredentialRejectedError extends TaishinVerificationRequiredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaishinCredentialRejectedError";
+  }
+}
+
+export class TaishinCaptchaRejectedError extends TaishinVerificationRequiredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaishinCaptchaRejectedError";
+  }
+}
+
+class TaishinLoginOutcomeUnknownError extends TaishinVerificationRequiredError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaishinLoginOutcomeUnknownError";
+  }
+}
+
+export class TaishinConnectionError extends Error {
+  constructor(
+    message: string,
+    readonly sessionCookies?: string,
+    readonly sessionCreatedAt?: string,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = "TaishinConnectionError";
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+export class TaishinSyncStageError extends TaishinConnectionError {
+  constructor(
+    readonly stage: TaishinSyncStage,
+    cause: unknown,
+    sessionCookies?: string,
+    sessionCreatedAt?: string,
+  ) {
+    const detail = safeTaishinRuntimeMessage(cause);
+    super(
+      `台新同步在${TAISHIN_SYNC_STAGE_LABELS[stage]}階段失敗${detail ? `：${detail}` : "。"}`,
+      sessionCookies,
+      sessionCreatedAt,
+      cause,
+    );
+    this.name = "TaishinSyncStageError";
+  }
+}
+
+class TaishinCaptchaUnavailableError extends TaishinConnectionError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaishinCaptchaUnavailableError";
+  }
+}
+
+class TaishinTransientConnectionError extends TaishinConnectionError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaishinTransientConnectionError";
+  }
+}
+
+export class TaishinBrowserCapacityError extends Error {
+  constructor(
+    message: string,
+    readonly retryAfterSeconds = 20,
+  ) {
+    super(message);
+    this.name = "TaishinBrowserCapacityError";
+  }
+}
+
+export function createTaishinConnector(
+  browser?: Fetcher,
+  recognizeCaptcha?: (
+    imageBytes: ArrayBuffer,
+    digitCount: number,
+  ) => Promise<string | null>,
+) {
+  return {
+    id: "taishin" as const,
+    name: "台新銀行",
+
+    async sync(
+      config: TaishinConfig,
+      _cursor?: string,
+    ): Promise<SyncResult<never>> {
+      requireCredentials(config);
+      if (!browser) throw new Error("台新銀行同步需要 BROWSER binding。");
+
+      let stage: TaishinSyncStage = "acquire_browser";
+      let browserInstance: Browser | undefined;
+      let page: Page | undefined;
+      let authenticated = false;
+      try {
+        browserInstance = await acquireBrowser(
+          browser,
+          config.browserSessionId,
+        );
+        stage = "initialize_browser_page";
+        const pages = await browserInstance.pages();
+        page = pages[0] ?? (await browserInstance.newPage());
+        stage = "configure_browser_page";
+        // Reconnecting creates a new Puppeteer emulation manager. Setting
+        // isMobile again reloads the preserved page and loses the CAPTCHA form.
+        if (!(config.browserSessionId && config.captcha)) {
+          await configurePage(page);
+        }
+        let loggedIn = false;
+
+        let pageContext: BrowserPage = page;
+        if (config.browserSessionId && config.captcha) {
+          stage = "login";
+          if (
+            !config.browserSessionExpiresAt ||
+            new Date(config.browserSessionExpiresAt) <= new Date()
+          ) {
+            throw new TaishinVerificationRequiredError(
+              "台新圖形驗證碼已逾時，請重新取得驗證碼。",
+            );
+          }
+          assertCaptcha(config.captcha, config.captchaDigitCount ?? 6);
+          pageContext = await findLoginFrame(page);
+          await submitLogin(pageContext, config.captcha, "manual", page);
+          loggedIn = true;
+        } else if (config.sessionCookies) {
+          stage = "restore_session";
+          await importCookies(page, config.sessionCookies);
+          await page.goto(RWD_URL, {
+            waitUntil: "domcontentloaded",
+            timeout: 30_000,
+          });
+          pageContext = await findLoginFrame(page);
+          loggedIn = await hasValidSession(pageContext);
+        }
+
+        if (!loggedIn) {
+          stage = "login";
+          if (!recognizeCaptcha) {
+            throw new TaishinVerificationRequiredError(
+              "台新銀行 session 已失效，需要重新登入。",
+            );
+          }
+          pageContext = await loginWithOcr(page, config, recognizeCaptcha);
+        }
+        authenticated = true;
+        await dismissPasswordReminder(pageContext);
+
+        let payloads;
+        try {
+          payloads = await fetchCreditCardPayloads(
+            pageContext,
+            (nextStage) => (stage = nextStage),
+          );
+        } catch (error) {
+          if (
+            !(error instanceof TaishinVerificationRequiredError) ||
+            !recognizeCaptcha
+          ) {
+            throw error;
+          }
+          stage = "login";
+          pageContext = await loginWithOcr(page, config, recognizeCaptcha);
+          authenticated = true;
+          await dismissPasswordReminder(pageContext);
+          payloads = await fetchCreditCardPayloads(
+            pageContext,
+            (nextStage) => (stage = nextStage),
+          );
+        }
+        let data;
+        stage = "parse_payload";
+        try {
+          data = parseTaishinCreditCardData(payloads);
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message.startsWith("台新信用卡 API")
+          ) {
+            throw new TaishinConnectionError(error.message);
+          }
+          throw error;
+        }
+        const now = new Date();
+        stage = "export_session";
+        return {
+          records: [],
+          ...data,
+          cursor: JSON.stringify({
+            sessionCookies: JSON.stringify(await page.cookies()),
+            sessionCreatedAt: now.toISOString(),
+            syncedAt: now.toISOString(),
+          }),
+        };
+      } catch (error) {
+        const normalized = normalizeTaishinSyncError(error, stage);
+        if (
+          authenticated &&
+          normalized instanceof TaishinConnectionError &&
+          page
+        ) {
+          const sessionCookies = await page
+            .cookies()
+            .then((cookies) => JSON.stringify(cookies))
+            .catch(() => undefined);
+          if (sessionCookies) {
+            if (normalized instanceof TaishinSyncStageError) {
+              throw new TaishinSyncStageError(
+                normalized.stage,
+                normalized.cause,
+                sessionCookies,
+                new Date().toISOString(),
+              );
+            }
+            throw new TaishinConnectionError(
+              normalized.message,
+              sessionCookies,
+              new Date().toISOString(),
+              normalized.cause,
+            );
+          }
+        }
+        throw normalized;
+      } finally {
+        if (browserInstance) await closeTaishinBrowser(browserInstance);
+      }
+    },
+  };
+}
+
+export async function prepareTaishinCaptcha(
+  browser: Fetcher | undefined,
+  config: TaishinConfig,
+) {
+  requireCredentials(config);
+  if (!browser) throw new Error("台新人工驗證需要 BROWSER binding。");
+
+  const browserInstance = await acquireBrowser(
+    browser,
+    config.browserSessionId,
+  );
+  const pages = await browserInstance.pages();
+  const page = pages[0] ?? (await browserInstance.newPage());
+  let preserved = false;
+  try {
+    await configurePage(page);
+    const { captcha } = await openLoginAndCaptureCaptcha(page, config);
+    const sessionId = browserInstance.sessionId();
+    await browserInstance.disconnect();
+    preserved = true;
+    return {
+      browserSessionId: sessionId,
+      browserSessionExpiresAt: new Date(
+        Date.now() + CAPTCHA_VALIDITY_MS,
+      ).toISOString(),
+      captchaDigitCount: captcha.digitCount,
+      captchaImage: `data:image/jpeg;base64,${bytesToBase64(captcha.bytes)}`,
+    };
+  } finally {
+    if (!preserved) await closeTaishinBrowser(browserInstance);
+  }
+}
+
+async function loginWithOcr(
+  page: Page,
+  config: TaishinConfig,
+  recognizeCaptcha: (
+    imageBytes: ArrayBuffer,
+    digitCount: number,
+  ) => Promise<string | null>,
+) {
+  let ocrAttempts = 0;
+  let loginRequests = 0;
+  while (
+    ocrAttempts < TAISHIN_AUTO_OCR_ATTEMPTS &&
+    loginRequests < TAISHIN_AUTO_LOGIN_ATTEMPTS
+  ) {
+    const startedAt = Date.now();
+    const previousLoginRequests = loginRequests;
+    let captchaValid = false;
+    let outcome = "failed";
+    try {
+      const { frame, captcha } = await openLoginAndCaptureCaptcha(page, config);
+      ocrAttempts += 1;
+      const answer = await recognizeCaptcha(
+        toArrayBuffer(captcha.bytes),
+        captcha.digitCount,
+      );
+      if (answer === null) {
+        outcome = "ocr_invalid";
+        continue;
+      }
+      assertCaptcha(answer, captcha.digitCount);
+      captchaValid = true;
+      await submitLogin(frame, answer, "automatic", page, () => {
+        loginRequests += 1;
+      });
+      outcome = "success";
+      return frame;
+    } catch (error) {
+      if (error instanceof TaishinCaptchaRejectedError) {
+        outcome = captchaValid ? "captcha_rejected" : "ocr_invalid";
+      } else {
+        if (error instanceof TaishinCredentialRejectedError) {
+          outcome = "credential_rejected";
+        } else if (error instanceof TaishinLoginOutcomeUnknownError) {
+          outcome = "login_unknown";
+        }
+        throw error;
+      }
+    } finally {
+      console.log(
+        JSON.stringify({
+          event: "taishin_auto_login_attempt",
+          connectorId: "taishin",
+          ocrAttempt: ocrAttempts,
+          loginRequests: loginRequests - previousLoginRequests,
+          totalLoginRequests: loginRequests,
+          outcome,
+          elapsedMs: Date.now() - startedAt,
+        }),
+      );
+    }
+  }
+  throw new TaishinVerificationRequiredError(
+    loginRequests >= TAISHIN_AUTO_LOGIN_ATTEMPTS
+      ? `台新自動登入已送出 ${loginRequests} 次，驗證碼仍遭拒絕，請改用人工驗證。`
+      : `台新驗證碼辨識已達 ${ocrAttempts} 次上限（登入已送出 ${loginRequests} 次），請改用人工驗證。`,
+  );
+}
+
+class TaishinNoCreditCardError extends Error {}
+
+async function fetchCreditCardPayloads(
+  page: BrowserPage,
+  setStage: (stage: TaishinSyncStage) => void,
+): Promise<TaishinCreditCardPayloads> {
+  try {
+    return await fetchCardholderPayloads(page, setStage);
+  } catch (error) {
+    if (!(error instanceof TaishinNoCreditCardError)) throw error;
+    return { hasCreditCard: false, summary: undefined, bills: [] };
+  }
+}
+
+async function fetchCardholderPayloads(
+  page: BrowserPage,
+  setStage: (stage: TaishinSyncStage) => void,
+) {
+  setStage("fetch_realtime");
+  const realtime = await fetchRealtimeTransactions(page);
+  let summary: unknown = { value: {}, error: null };
+  try {
+    setStage("fetch_summary");
+    summary = await postJson(page, SUMMARY_PATH, {}, OPTIONAL_API_TIMEOUT_MS);
+    const billingContext = taishinBillingContext(summary);
+    const months = recentMonths(BANK_SYNC_MONTHS, billingContext.anchor);
+    const fetchBill = ({ year, month }: (typeof months)[number]) =>
+      postJson(
+        page,
+        BILL_PATH,
+        {
+          org: billingContext.org,
+          byear: String(year),
+          bmonth: String(month).padStart(2, "0"),
+          cardHolderFlagSelected: "1",
+          cardNo: "",
+        },
+        OPTIONAL_API_TIMEOUT_MS,
+      );
+    setStage("fetch_current_bill");
+    const currentBill = await fetchBill(months[0]!);
+    const overview = await postJson(
+      page,
+      OVERVIEW_PATH,
+      {},
+      OPTIONAL_API_TIMEOUT_MS,
+    ).catch((error) => {
+      if (error instanceof TaishinNoCreditCardError) throw error;
+      console.warn(
+        `[taishin] current payment overview skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    });
+    if (!hasBillPayload(currentBill)) {
+      return { summary, overview, bills: [], realtime };
+    }
+    setStage("fetch_historical_bills");
+    const historicalBills = (
+      await Promise.all(
+        months.slice(1).map((month) =>
+          fetchBill(month).catch((error) => {
+            if (error instanceof TaishinNoCreditCardError) throw error;
+            return undefined;
+          }),
+        ),
+      )
+    ).filter((bill) => bill !== undefined);
+    return {
+      summary,
+      overview,
+      bills: [currentBill, ...historicalBills],
+      realtime,
+    };
+  } catch (error) {
+    if (error instanceof TaishinVerificationRequiredError) throw error;
+    if (!(error instanceof TaishinConnectionError)) throw error;
+    console.warn(`[taishin] optional bill sync skipped: ${error.message}`);
+    return { summary, bills: [], realtime };
+  }
+}
+
+async function fetchRealtimeTransactions(page: BrowserPage) {
+  for (let attempt = 1; attempt <= REALTIME_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await postJson(page, REALTIME_PATH, "", REQUIRED_API_TIMEOUT_MS);
+    } catch (error) {
+      const isBusy =
+        error instanceof TaishinConnectionError &&
+        /系統忙碌|無法取得資料/.test(error.message);
+      const isTransient = error instanceof TaishinTransientConnectionError;
+      if (!isBusy && !isTransient) throw error;
+      if (attempt < REALTIME_RETRY_ATTEMPTS) {
+        console.warn(
+          `[taishin] realtime retry ${attempt}/${REALTIME_RETRY_ATTEMPTS}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+      } else if (isBusy) {
+        console.warn(
+          `[taishin] realtime sync skipped after ${attempt} busy responses`,
+        );
+      } else {
+        throw error;
+      }
+    }
+  }
+  return { value: { fmtRealTxListMap: [] }, error: null };
+}
+
+function hasBillPayload(payload: unknown) {
+  if (!isRecord(payload) || !isRecord(payload.value)) return false;
+  return (
+    typeof payload.value.showAccoutnYM === "string" &&
+    payload.value.showAccoutnYM.trim().length > 0
+  );
+}
+
+async function hasValidSession(
+  page: BrowserPage,
+  diagnostic?: SessionCheckDiagnostic,
+) {
+  try {
+    const payload = await postJson(
+      page,
+      SESSION_CHECK_PATH,
+      {},
+      REQUIRED_API_TIMEOUT_MS,
+      diagnostic,
+    );
+    const expired = isRecord(payload) && payload.RESULT === "EXPIRED";
+    const hasSessionId =
+      isRecord(payload) &&
+      typeof payload.DBSESSIONID === "string" &&
+      payload.DBSESSIONID.length > 0;
+    if (diagnostic) {
+      const result = isRecord(payload) ? payload.RESULT : undefined;
+      Object.assign(diagnostic, {
+        expired,
+        hasSessionId,
+        result: safeLoginCode(result),
+      });
+    }
+    return !expired && hasSessionId;
+  } catch {
+    if (diagnostic) diagnostic.checkFailed = true;
+    return false;
+  }
+}
+
+async function postJson(
+  page: BrowserPage,
+  path: string,
+  body?: JsonRecord | string,
+  timeoutMs = REQUIRED_API_TIMEOUT_MS,
+  diagnostic?: SessionCheckDiagnostic,
+) {
+  const response = await page.evaluate(
+    async (input: {
+      path: string;
+      body?: JsonRecord | string;
+      timeoutMs: number;
+    }) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+      try {
+        const response = await fetch(input.path, {
+          method: "POST",
+          headers: {
+            Accept: "application/json, text/plain, */*",
+            "Content-Type":
+              typeof input.body === "string"
+                ? "application/x-www-form-urlencoded"
+                : "application/json",
+          },
+          body:
+            typeof input.body === "string"
+              ? input.body
+              : input.body
+                ? JSON.stringify(input.body)
+                : undefined,
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        return {
+          ok: response.ok,
+          status: response.status,
+          contentType: response.headers.get("content-type") ?? "",
+          text: await response.text(),
+          timedOut: false,
+          errorName: "",
+          errorMessage: "",
+        };
+      } catch (error) {
+        const errorName = error instanceof Error ? error.name : "UnknownError";
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        return {
+          ok: false,
+          status: 0,
+          contentType: "",
+          text: "",
+          timedOut: controller.signal.aborted || errorName === "AbortError",
+          errorName,
+          errorMessage,
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    { path, body, timeoutMs },
+  );
+  const endpoint = path.split("/").at(-1) ?? path;
+  if (diagnostic) {
+    Object.assign(diagnostic, {
+      httpStatus: response.status,
+      isJson: response.contentType.includes("application/json"),
+      timedOut: response.timedOut === true,
+    });
+  }
+  if (response.timedOut) {
+    throw new TaishinTransientConnectionError(
+      `台新信用卡 API ${endpoint} 請求逾時。`,
+    );
+  }
+  if (response.status === 0) {
+    const detail = browserFetchErrorDetail(
+      response.errorName,
+      response.errorMessage,
+    );
+    throw new TaishinTransientConnectionError(
+      `台新信用卡 API ${endpoint} 網路請求失敗${detail ? `（${detail}）` : ""}。`,
+    );
+  }
+  if (!response.ok) {
+    const ErrorClass =
+      response.status >= 500
+        ? TaishinTransientConnectionError
+        : TaishinConnectionError;
+    throw new ErrorClass(
+      `台新信用卡 API ${endpoint} 回應 HTTP ${response.status}。`,
+    );
+  }
+  if (!response.contentType.includes("application/json")) {
+    if (/登入|login/i.test(response.text)) {
+      throw new TaishinVerificationRequiredError(
+        "台新銀行 session 已失效，需要重新登入。",
+      );
+    }
+    throw new TaishinConnectionError("台新信用卡 API 回應不是 JSON。");
+  }
+  try {
+    const payload = JSON.parse(response.text) as unknown;
+    if (diagnostic) {
+      diagnostic.validJson = true;
+      diagnostic.hasApiError = isRecord(payload) && Boolean(payload.error);
+    }
+    if (isRecord(payload) && Boolean(payload.error)) {
+      if (
+        [REALTIME_PATH, SUMMARY_PATH, OVERVIEW_PATH, BILL_PATH].includes(
+          path,
+        ) &&
+        isNoCreditCardMessage(
+          isRecord(payload.error) ? payload.error.message : payload.error,
+        )
+      )
+        throw new TaishinNoCreditCardError();
+      const endpoint = path.split("/").at(-1) ?? path;
+      const detail = summarizeApiError(payload.error);
+      throw new TaishinConnectionError(
+        `台新信用卡 API ${endpoint} 回傳錯誤${detail ? `：${detail}` : ""}。`,
+      );
+    }
+    return payload;
+  } catch (error) {
+    if (error instanceof TaishinNoCreditCardError) throw error;
+    if (error instanceof TaishinConnectionError) throw error;
+    if (diagnostic) diagnostic.validJson = false;
+    throw new TaishinConnectionError("台新信用卡 API 回應格式無效。");
+  }
+}
+
+function browserFetchErrorDetail(name: string, message: string) {
+  const safeName = sanitizeBrowserErrorPart(name, 40);
+  const safeMessage = sanitizeBrowserErrorPart(message, 160);
+  return [safeName, safeMessage].filter(Boolean).join(": ");
+}
+
+function sanitizeBrowserErrorPart(value: string, maxLength: number) {
+  return value
+    .replace(/https?:\/\/\S+/gi, "[URL]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+async function openLoginAndFill(page: Page, config: TaishinConfig) {
+  await page.goto(RWD_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: 30_000,
+  });
+  const frame = await findLoginFrame(page);
+  if (await isLoggedIn(frame)) return frame;
+
+  const selectors = await frame.evaluate(
+    (values: { userId: string; account: string; password: string }) => {
+      const inputs = Array.from(
+        document.querySelectorAll<HTMLInputElement>("input"),
+      );
+      const renderedInputs = inputs.filter((input) => {
+        const rect = input.getBoundingClientRect();
+        return (
+          !input.disabled &&
+          input.type !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      });
+      const candidateInputs =
+        renderedInputs.length >= 4
+          ? renderedInputs
+          : inputs.filter(
+              (input) => !input.disabled && input.type !== "hidden",
+            );
+      const labelText = (input: HTMLInputElement) => {
+        const explicit = input.id
+          ? document.querySelector<HTMLLabelElement>(
+              `label[for="${CSS.escape(input.id)}"]`,
+            )?.innerText
+          : "";
+        const parentText = input.parentElement?.innerText ?? "";
+        const localParent = parentText.length <= 20 ? parentText : "";
+        return [
+          input.id,
+          input.name,
+          input.placeholder,
+          input.getAttribute("aria-label"),
+          input.getAttribute("aria-placeholder"),
+          explicit,
+          input.closest("label")?.innerText,
+          localParent,
+        ]
+          .filter(Boolean)
+          .join(" ");
+      };
+      const mark = (input: HTMLInputElement | undefined, field: string) => {
+        if (!input) return "";
+        input.dataset.taishinField = field;
+        return `input[data-taishin-field="${field}"]`;
+      };
+      const setValue = (input: HTMLInputElement | undefined, value: string) => {
+        if (!input || !value) return;
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        setter?.call(input, value);
+        if (input.value !== value) input.value = value;
+        input.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            composed: true,
+            data: value,
+            inputType: "insertText",
+          }),
+        );
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const find = (pattern: RegExp) =>
+        candidateInputs.find((input) => pattern.test(labelText(input)));
+      const password =
+        find(/使用者密碼|password|passwd/i) ??
+        candidateInputs.find((input) => input.type === "password");
+      const captcha =
+        find(/驗證碼|captcha|validate|check.?code/i) ??
+        candidateInputs.find(
+          (input) =>
+            input !== password &&
+            input.maxLength >= 4 &&
+            input.maxLength <= 8 &&
+            (input.inputMode === "numeric" || input.pattern.includes("\\d")),
+        ) ??
+        candidateInputs.at(-1);
+      const identityInputs = candidateInputs.filter(
+        (input) =>
+          input !== password &&
+          input !== captcha &&
+          ["", "text", "tel"].includes(input.type),
+      );
+      const matchedUserId = find(/身分證|統一編號|cust(?:omer)?id/i);
+      const userId =
+        matchedUserId && matchedUserId !== password && matchedUserId !== captcha
+          ? matchedUserId
+          : identityInputs[0];
+      const matchedAccount = find(
+        /使用者代(?:號|碼)|登入代(?:號|碼)|user(?:id|code)/i,
+      );
+      const account =
+        matchedAccount &&
+        matchedAccount !== userId &&
+        matchedAccount !== password &&
+        matchedAccount !== captcha
+          ? matchedAccount
+          : identityInputs.find((input) => input !== userId);
+      setValue(userId, values.userId);
+      setValue(account, values.account);
+      setValue(password, values.password);
+      return {
+        userId: mark(userId, "user-id"),
+        account: mark(account, "account"),
+        password: mark(password, "password"),
+        captcha: mark(captcha, "captcha"),
+      };
+    },
+    {
+      userId: config.userId ?? "",
+      account: config.account ?? "",
+      password: config.password ?? "",
+    },
+  );
+  if (
+    !selectors.userId ||
+    !selectors.account ||
+    !selectors.password ||
+    !selectors.captcha
+  ) {
+    throw new TaishinConnectionError("台新登入頁欄位結構已變更。");
+  }
+  return frame;
+}
+
+async function openLoginAndCaptureCaptcha(page: Page, config: TaishinConfig) {
+  for (let retry = 0; retry <= CAPTCHA_PAGE_RETRY_ATTEMPTS; retry += 1) {
+    const frame = await openLoginAndFill(page, config);
+    try {
+      return { frame, captcha: await captureCaptcha(frame) };
+    } catch (error) {
+      if (
+        !(error instanceof TaishinCaptchaUnavailableError) ||
+        retry >= CAPTCHA_PAGE_RETRY_ATTEMPTS
+      ) {
+        throw error;
+      }
+    }
+  }
+  throw new TaishinCaptchaUnavailableError(
+    "台新登入頁沒有在期限內取得圖形驗證碼。",
+  );
+}
+
+async function typeInput(page: BrowserPage, selector: string, value: string) {
+  await page.type(selector, value, { delay: 20 });
+}
+
+async function captureCaptcha(page: BrowserPage) {
+  try {
+    await page.waitForFunction(
+      () => {
+        const captchaInput = document.querySelector<HTMLInputElement>(
+          'input[data-taishin-field="captcha"]',
+        );
+        if (!captchaInput) return false;
+        const images = Array.from(
+          document.querySelectorAll<HTMLImageElement>("img"),
+        );
+        const isHinted = (image: HTMLImageElement) => {
+          const hint = [image.id, image.className, image.alt, image.src].join(
+            " ",
+          );
+          return /captcha|驗證|validate|check.?code|verify.?code|shuffle/i.test(
+            hint,
+          );
+        };
+        const hasHintedImage = images.some(isHinted);
+        return images.some((image) => {
+          if (!image.complete || image.naturalWidth <= 0) return false;
+          const rect = image.getBoundingClientRect();
+          if (rect.width < 50 || rect.height < 20) return false;
+          if (hasHintedImage && !isHinted(image)) return false;
+          return true;
+        });
+      },
+      { timeout: CAPTCHA_IMAGE_TIMEOUT_MS },
+    );
+  } catch {
+    throw new TaishinCaptchaUnavailableError(
+      "台新登入頁沒有在期限內取得圖形驗證碼。",
+    );
+  }
+  const target = await page.evaluate(() => {
+    const captchaInput = document.querySelector<HTMLInputElement>(
+      'input[data-taishin-field="captcha"]',
+    );
+    if (!captchaInput) return undefined;
+    const inputRect = captchaInput.getBoundingClientRect();
+    const images = Array.from(
+      document.querySelectorAll<HTMLImageElement>("img"),
+    )
+      .filter((image) => image.complete && image.naturalWidth > 0)
+      .map((image) => {
+        const rect = image.getBoundingClientRect();
+        const hint = [image.id, image.className, image.alt, image.src].join(
+          " ",
+        );
+        return {
+          image,
+          score:
+            (/captcha|驗證|validate|check.?code|verify.?code|shuffle/i.test(
+              hint,
+            )
+              ? 1000
+              : 0) -
+            Math.abs(rect.top - inputRect.top) -
+            Math.abs(rect.left - inputRect.right),
+          width: rect.width,
+          height: rect.height,
+        };
+      })
+      .filter(({ width, height }) => width >= 50 && height >= 20)
+      .sort((left, right) => right.score - left.score);
+    const image = images[0]?.image;
+    if (!image) return undefined;
+    image.dataset.taishinCaptcha = "image";
+    const declaredLength = captchaInput.maxLength;
+    return {
+      selector: 'img[data-taishin-captcha="image"]',
+      digitCount:
+        declaredLength >= 4 && declaredLength <= 8 ? declaredLength : 6,
+    };
+  });
+  if (!target) {
+    throw new TaishinCaptchaUnavailableError(
+      "台新登入頁沒有在期限內取得圖形驗證碼。",
+    );
+  }
+  const image = await page.$(target.selector);
+  if (!image) throw new TaishinConnectionError("台新圖形驗證碼已失效。");
+  const bytes = await image.screenshot({ type: "jpeg" });
+  return { bytes, digitCount: target.digitCount };
+}
+
+async function submitLogin(
+  page: BrowserPage,
+  captcha: string,
+  mode: "manual" | "automatic" = "automatic",
+  networkPage?: Page,
+  onLoginRequest?: () => void,
+) {
+  const startedAt = Date.now();
+  const sessionChecks: SessionCheckDiagnostic[] = [];
+  let loginRequestCount = 0;
+  let loginResponseCount = 0;
+  const pendingResponses: Promise<void>[] = [];
+  const isLoginUrl = (url: string) =>
+    url.split("?")[0] ===
+    "https://my.taishinbank.com.tw/TIBNetBank/svc/web/login/login";
+  const onRequest = (request: HTTPRequest) => {
+    if (!isLoginUrl(request.url())) return;
+    loginRequestCount += 1;
+    onLoginRequest?.();
+  };
+  const onResponse = (response: HTTPResponse) => {
+    if (!isLoginUrl(response.url())) return;
+    loginResponseCount += 1;
+    pendingResponses.push(logLoginResponse(response, mode));
+  };
+  networkPage?.on("request", onRequest);
+  networkPage?.on("response", onResponse);
+  try {
+    const captchaInput =
+      'input[data-taishin-field="captcha"], input[placeholder*="驗證碼"]';
+    await typeInput(page, captchaInput, captcha);
+    const loginButton = await page.evaluate(() => {
+      const normalize = (value: string | null | undefined) =>
+        value?.replace(/\s+/g, "").trim() ?? "";
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>("body *"),
+      ).filter((element) => {
+        const rect = element.getBoundingClientRect();
+        const label =
+          element.tagName === "INPUT"
+            ? (element as HTMLInputElement).value
+            : element.innerText;
+        return (
+          !element.hidden &&
+          !("disabled" in element && Boolean(element.disabled)) &&
+          element.getAttribute("aria-disabled") !== "true" &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          [label, element.getAttribute("aria-label"), element.title].some(
+            (value) => normalize(value) === "登入網銀",
+          )
+        );
+      });
+      const target =
+        candidates.find((element) =>
+          element.matches(
+            'button, a, input[type="button"], input[type="submit"], [role="button"], [class*="btn"], [class*="button"]',
+          ),
+        ) ?? candidates.at(-1);
+      if (!target) return false;
+      target.dataset.taishinLogin = "submit";
+      target.click();
+      return true;
+    });
+    if (!loginButton) {
+      throw new TaishinConnectionError("台新登入按鈕結構已變更。");
+    }
+
+    for (let attempt = 0; attempt < LOGIN_RESULT_ATTEMPTS; attempt += 1) {
+      const detail = await readLoginDetail(page);
+      if (isMissingLoginField(detail)) {
+        await dismissMissingFieldAlert(page);
+        throw new TaishinLoginOutcomeUnknownError(
+          "台新登入頁沒有帶入身分證字號，請稍後再試。",
+        );
+      }
+      if (isCaptchaRejected(detail)) {
+        throw new TaishinCaptchaRejectedError("台新圖形驗證碼錯誤。");
+      }
+      if (isCredentialRejected(detail)) {
+        throw new TaishinCredentialRejectedError(
+          "台新登入資料遭銀行拒絕，請確認設定。",
+        );
+      }
+      if (/USER\s*正在線上.*無法登入/i.test(detail)) {
+        throw new TaishinVerificationRequiredError(
+          "台新網銀已有使用中連線，請先登出後再試。",
+        );
+      }
+      const diagnostic: SessionCheckDiagnostic = {};
+      sessionChecks.push(diagnostic);
+      if (await hasValidSession(page, diagnostic)) return;
+      if (attempt < LOGIN_RESULT_ATTEMPTS - 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, LOGIN_RESULT_POLL_MS),
+        );
+      }
+    }
+
+    console.warn(
+      JSON.stringify({
+        event: "taishin_login_outcome_unknown",
+        mode,
+        attempts: sessionChecks.length,
+        elapsedMs: Date.now() - startedAt,
+        sessionChecks,
+        loginRequestCount,
+        loginResponseCount,
+      }),
+    );
+    throw new TaishinLoginOutcomeUnknownError(
+      mode === "manual"
+        ? "台新人工驗證已送出，但尚未確認登入成功，請稍後重新取得驗證碼再試。"
+        : loginRequestCount > 0
+          ? "台新自動驗證已送出，但尚未確認登入成功。"
+          : "台新自動登入請求未送出，請稍後再試。",
+    );
+  } finally {
+    networkPage?.off("request", onRequest);
+    networkPage?.off("response", onResponse);
+    await Promise.all(pendingResponses);
+  }
+}
+
+function safeLoginCode(value: unknown) {
+  if (typeof value !== "string") return "missing";
+  if (!value) return "empty";
+  return /^[A-Z][A-Z0-9_]{0,23}$/.test(value) || /^[0-9]{1,3}$/.test(value)
+    ? value
+    : "unrecognized";
+}
+
+async function logLoginResponse(
+  response: HTTPResponse,
+  mode: "manual" | "automatic",
+) {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    // Do not log response bodies or upstream exception messages.
+  }
+  console.warn(
+    JSON.stringify({
+      event: "taishin_login_response",
+      mode,
+      httpStatus: response.status(),
+      validJson: payload !== undefined,
+      result: safeLoginCode(isRecord(payload) ? payload.RESULT : undefined),
+      status: safeLoginCode(isRecord(payload) ? payload.STATUS : undefined),
+      hasErrorMessage: isRecord(payload) && Boolean(payload.ERRORMSG),
+    }),
+  );
+}
+
+async function readLoginDetail(page: BrowserPage) {
+  return page
+    .evaluate(() =>
+      (
+        document.querySelector<HTMLElement>(".js-popup.active ._popup_text")
+          ?.innerText ||
+        document.body?.innerText ||
+        ""
+      )
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 1_000),
+    )
+    .catch(() => "");
+}
+
+function isMissingLoginField(detail: string) {
+  return /請輸入身分證字號|請輸入.*統一編號/.test(detail);
+}
+
+async function dismissMissingFieldAlert(page: BrowserPage) {
+  try {
+    await page.waitForFunction(
+      () => {
+        const normalize = (value: string | null | undefined) =>
+          value?.replace(/\s+/g, "").trim() ?? "";
+        const roots = [
+          ...document.querySelectorAll<HTMLElement>(
+            "dialog, [role='dialog'], .js-popup.active, .modal, .popup",
+          ),
+          document.body,
+        ];
+        for (const root of roots) {
+          if (!root || !/請輸入身分證字號/.test(normalize(root.innerText))) {
+            continue;
+          }
+          const confirm = Array.from(
+            root.querySelectorAll<HTMLElement>(
+              "button, a, [role='button'], input[type='button']",
+            ),
+          ).find((element) => {
+            const label = normalize(
+              element.innerText || (element as HTMLInputElement).value,
+            );
+            return label === "確定";
+          });
+          if (!confirm) continue;
+          confirm.click();
+          return true;
+        }
+        return false;
+      },
+      { timeout: 1_000 },
+    );
+  } catch {
+    // The validation dialog may already have closed.
+  }
+}
+
+function isCaptchaRejected(detail: string) {
+  return (
+    /驗證碼.{0,30}(?:錯誤|有誤|不正確|無效)/.test(detail) ||
+    /(?:錯誤|有誤|不正確|無效).{0,30}驗證碼/.test(detail)
+  );
+}
+
+function isCredentialRejected(detail: string) {
+  const field = "(?:密碼|使用者代(?:號|碼)|身分證(?:字號)?|統一編號)";
+  const failure = "(?:錯誤|有誤|不正確|無效)";
+  return (
+    new RegExp(`${field}.{0,30}${failure}`).test(detail) ||
+    new RegExp(`${failure}.{0,30}${field}`).test(detail)
+  );
+}
+
+async function isLoggedIn(page: BrowserPage) {
+  return page
+    .evaluate(
+      () =>
+        document.body.innerText.includes("帳戶總覽") &&
+        !document.body.innerText.includes("身分證字號"),
+    )
+    .catch(() => false);
+}
+
+async function dismissPasswordReminder(page: BrowserPage) {
+  try {
+    const handle = await page.waitForFunction(
+      () => {
+        const normalize = (value: string | null | undefined) =>
+          value?.replace(/\s+/g, "").trim() ?? "";
+        const isReminder = (text: string) =>
+          /每(?:三|3)個月變更一次密碼|密碼(?:已)?(?:超過|逾)?(?:3個月|三個月|90天|未更新|未變更)/.test(
+            text,
+          );
+        const isVisible = (element: HTMLElement) => {
+          if (
+            element.hidden ||
+            element.getAttribute("aria-hidden") === "true"
+          ) {
+            return false;
+          }
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const closeButton = (root: {
+          querySelectorAll: typeof document.querySelectorAll;
+        }) =>
+          Array.from(
+            root.querySelectorAll<HTMLElement>(
+              "button, a, [role='button'], input[type='button']",
+            ),
+          ).find((element) => {
+            const label = normalize(
+              element.innerText ||
+                (element as HTMLInputElement).value ||
+                element.getAttribute("aria-label") ||
+                element.title,
+            );
+            return isVisible(element) && label === "關閉";
+          });
+
+        const dialogs = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            "dialog, [role='dialog'], .js-popup.active, .modal, .popup",
+          ),
+        );
+        for (const dialog of dialogs) {
+          if (!isReminder(normalize(dialog.innerText))) continue;
+          const dismiss = closeButton(dialog);
+          if (!dismiss) continue;
+          dismiss.click();
+          return true;
+        }
+
+        if (!isReminder(normalize(document.body?.innerText))) return false;
+        const dismiss = closeButton(document);
+        if (!dismiss) return false;
+        dismiss.click();
+        return true;
+      },
+      { timeout: 2_000 },
+    );
+    const dismissed =
+      handle && typeof handle.jsonValue === "function"
+        ? Boolean(await handle.jsonValue())
+        : false;
+    if (dismissed) {
+      console.warn(
+        JSON.stringify({
+          event: "taishin_password_reminder_dismissed",
+          connectorId: "taishin",
+        }),
+      );
+    }
+  } catch {
+    // No reminder, or the overlay closed before the click landed.
+  }
+}
+
+async function findLoginFrame(page: Page): Promise<BrowserPage> {
+  if (!page.frames) return page;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const frames = page.frames();
+    for (const frame of frames) {
+      const state = await frame
+        .evaluate(() => ({
+          text: document.body?.innerText ?? "",
+          inputCount: document.querySelectorAll("input").length,
+        }))
+        .catch(() => ({ text: "", inputCount: 0 }));
+      if (state.text.includes("帳戶總覽") || state.inputCount >= 4) {
+        return frame;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return page.mainFrame();
+}
+
+function recentMonths(count: number, anchor = new Date()) {
+  return Array.from({ length: count }, (_, index) => {
+    const date = new Date(
+      Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() - index, 1),
+    );
+    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 };
+  });
+}
+
+function taishinBillingContext(summary: unknown) {
+  const value =
+    isRecord(summary) && isRecord(summary.value) ? summary.value : undefined;
+  const knownOrganizations = ["001", "055", "100"];
+  const org =
+    knownOrganizations.find((candidate) => isRecord(value?.[candidate])) ??
+    "001";
+  const account = isRecord(value?.[org]) ? value[org] : undefined;
+  const statementDate =
+    typeof account?.["OUT-DTE-LST-STMT"] === "string"
+      ? account["OUT-DTE-LST-STMT"]
+      : "";
+  const match = /^(\d{4})(\d{2})\d{2}$/.exec(statementDate);
+  const year = Number(match?.[1]);
+  const month = Number(match?.[2]);
+  const anchor =
+    year >= 2000 && month >= 1 && month <= 12
+      ? new Date(Date.UTC(year, month - 1, 1))
+      : new Date();
+  return { org, anchor };
+}
+
+async function importCookies(page: Page, serialized: string) {
+  let cookies: unknown;
+  try {
+    cookies = JSON.parse(serialized);
+  } catch {
+    throw new TaishinVerificationRequiredError(
+      "台新銀行 session 格式無效，需要重新登入。",
+    );
+  }
+  if (!Array.isArray(cookies)) {
+    throw new TaishinVerificationRequiredError(
+      "台新銀行 session 格式無效，需要重新登入。",
+    );
+  }
+  const safeCookies = cookies.filter(isRecord).filter((cookie) => {
+    const domain = String(cookie.domain ?? "")
+      .replace(/^\./, "")
+      .toLowerCase();
+    return (
+      !domain ||
+      domain === "my.taishinbank.com.tw" ||
+      domain.endsWith(".taishinbank.com.tw")
+    );
+  });
+  if (safeCookies.length === 0) return;
+  await page.setCookie(
+    ...(safeCookies as unknown as Parameters<Page["setCookie"]>),
+  );
+}
+
+async function acquireBrowser(browser: Fetcher, preferredSessionId?: string) {
+  if (preferredSessionId) {
+    const sessions = await puppeteer.sessions(browser).catch(() => []);
+    const preferred = sessions.find(
+      (session) => session.sessionId === preferredSessionId,
+    );
+    if (preferred?.connectionId) {
+      throw new TaishinBrowserCapacityError(
+        "台新驗證碼正在使用中，請稍候再試。",
+        3,
+      );
+    }
+    if (preferred) {
+      try {
+        return await connectBrowserWithCancellation(
+          browser,
+          preferred.sessionId,
+        );
+      } catch {
+        throw new TaishinBrowserCapacityError(
+          "前一個台新驗證工作階段尚未釋放，請稍候再試。",
+          3,
+        );
+      }
+    }
+  }
+  const limits = await puppeteer.limits(browser).catch(() => undefined);
+  if (limits && limits.allowedBrowserAcquisitions < 1) {
+    throw new BrowserRunCapacityError(
+      "acquisition_rate_limit",
+      Math.max(
+        1,
+        Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1000),
+      ),
+    );
+  }
+  return launchBrowser(browser, { keep_alive: CAPTCHA_KEEP_ALIVE_MS });
+}
+
+async function launchBrowser(
+  browser: Fetcher,
+  options?: { keep_alive?: number },
+): Promise<Browser> {
+  return launchBrowserWithRetry(browser, options);
+}
+
+function normalizeTaishinSyncError(error: unknown, stage: TaishinSyncStage) {
+  if (
+    error instanceof TaishinConnectionError ||
+    error instanceof TaishinVerificationRequiredError ||
+    error instanceof TaishinBrowserCapacityError ||
+    error instanceof BrowserRunCapacityError
+  ) {
+    return error;
+  }
+  return new TaishinSyncStageError(stage, error);
+}
+
+async function closeTaishinBrowser(browser: Browser) {
+  try {
+    await browser.close();
+  } catch (error) {
+    const message = safeTaishinRuntimeMessage(error);
+    console.warn(
+      JSON.stringify({
+        event: "taishin_browser_cleanup_failed",
+        connectorId: "taishin",
+        stage: "close_browser",
+        errorName: error instanceof Error ? error.name : typeof error,
+        message: message || "瀏覽器關閉失敗，但未取得錯誤原因。",
+      }),
+    );
+  }
+}
+
+function safeTaishinRuntimeMessage(error: unknown) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : error === null || error === undefined
+        ? ""
+        : String(error);
+  return sanitizeBrowserErrorPart(message, 240)
+    .replace(
+      /\b(authorization|cookie|password|passwd|token|secret|session(?:cookies?)?)\s*[:=]\s*([^\s,;]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(/\b(?:Bearer\s+)?[A-Za-z0-9+/_=-]{24,}\b/g, "[redacted]");
+}
+
+async function configurePage(page: Page) {
+  await page.setViewport({ width: 390, height: 844, isMobile: true });
+  await page.setUserAgent(USER_AGENT);
+}
+
+function requireCredentials(config: TaishinConfig) {
+  if (!config.userId || !config.account || !config.password) {
+    throw new TaishinVerificationRequiredError(
+      "請先儲存台新身分證字號、使用者代號與使用者密碼。",
+    );
+  }
+}
+
+function assertCaptcha(value: string, digitCount: number) {
+  if (!new RegExp(`^\\d{${digitCount}}$`).test(value)) {
+    throw new TaishinCaptchaRejectedError(
+      `台新驗證碼必須是 ${digitCount} 位數字。`,
+    );
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array | string) {
+  if (typeof bytes === "string") return bytes;
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function toArrayBuffer(bytes: Uint8Array | string) {
+  if (typeof bytes !== "string") {
+    return bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+  }
+  const binary = atob(bytes);
+  const decoded = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1)
+    decoded[index] = binary.charCodeAt(index);
+  return decoded.buffer;
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function summarizeApiError(value: unknown) {
+  const serialized =
+    typeof value === "string"
+      ? value
+      : (() => {
+          try {
+            return JSON.stringify(value);
+          } catch {
+            return String(value);
+          }
+        })();
+  return serialized
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[。.!！]+$/, "")
+    .slice(0, 300);
+}

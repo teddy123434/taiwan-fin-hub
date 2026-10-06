@@ -1,0 +1,605 @@
+import type { Connector } from "../types";
+import type { Invoice, InvoiceLineItem } from "@taiwan-fin-hub/shared";
+import { z } from "zod";
+import { currentPeriodIndex, periodFromIndex } from "./invoice-data";
+import { EINVOICE_SYNC_PERIODS } from "../sync-window";
+import { EInvoiceV2Client, type EInvoiceV2Session } from "./v2-client";
+
+const invoiceRecordSchema = z.object({
+  sourceId: z.string().min(1),
+  invoiceNumber: z.string().optional(),
+  invoiceDate: z.string().min(1),
+  sellerName: z.string().optional(),
+  amount: z.number().int().nonnegative(),
+  raw: z.unknown().optional(),
+});
+
+export const invoiceConfigSchema = z.object({
+  records: z.array(invoiceRecordSchema).default([]),
+  protocol: z
+    .enum(["legacy", "v2"])
+    .default("v2")
+    .transform(() => "v2" as const),
+  mobile: z.string().min(1).optional(),
+  password: z.string().min(1).optional(),
+  apiKey: z.string().min(1).optional(),
+  mobileBarcode: z.string().min(1).optional(),
+  userToken: z.string().min(1).optional(),
+  androidId: z.string().min(1).optional(),
+  ptoken: z.string().optional(),
+  loginClientCode: z.string().optional(),
+  loginType: z.number().int().min(0).max(9).default(0),
+  sid: z.string().optional(),
+  token: z.string().optional(),
+  iv: z.string().optional(),
+  svrCode: z.string().optional(),
+  loginAppId: z.string().optional(),
+  loginLiat: z.number().int().optional(),
+  loginSsMe: z.string().optional(),
+  ltoken: z.string().optional(),
+  hkey: z.string().optional(),
+  serverTimeOffset: z.number().int().optional(),
+});
+
+export type InvoiceConfig = z.infer<typeof invoiceConfigSchema>;
+
+export function parseInvoiceConfig(config: unknown) {
+  return invoiceConfigSchema.parse(config);
+}
+
+type NormalizedInvoice = Omit<Invoice, "id" | "connectorId">;
+
+type NormalizedInvoiceLineItem = Omit<
+  InvoiceLineItem,
+  "id" | "connectorId" | "invoiceId"
+>;
+
+/** JSON-serializable protocol state which is safe to persist between Queue invocations. */
+export type EInvoiceSessionConfigUpdates = Pick<
+  EInvoiceV2Session,
+  | "sid"
+  | "token"
+  | "iv"
+  | "svrCode"
+  | "loginAppId"
+  | "loginLiat"
+  | "loginSsMe"
+  | "ltoken"
+  | "hkey"
+  | "serverTimeOffset"
+> & {
+  loginClientCode?: string;
+  mobileBarcode?: string;
+};
+
+export type EInvoiceInvoiceHeader = {
+  sourceId: string;
+  invNum: string;
+  detailInvDate: string;
+  invoice: NormalizedInvoice;
+  period: ReturnType<typeof periodFromIndex>;
+};
+
+/** A fully serializable work item for one detail request. */
+export type EInvoiceDetailTask = EInvoiceInvoiceHeader;
+
+export type EInvoiceSyncInitialization = {
+  session: EInvoiceV2Session;
+  configUpdates: EInvoiceSessionConfigUpdates;
+  headers: EInvoiceInvoiceHeader[];
+  detailTasks: EInvoiceDetailTask[];
+};
+
+export type EInvoiceDetailResult = {
+  invoice: NormalizedInvoice;
+  invoiceLineItems: NormalizedInvoiceLineItem[];
+  detail: unknown;
+  detailItems: ReturnType<typeof getV2DetailItems>;
+};
+
+export type EInvoicePrimitiveOptions = {
+  client?: EInvoiceV2Client;
+  now?: Date;
+};
+
+export const einvoiceConnector: Connector<
+  InvoiceConfig,
+  Omit<Invoice, "id" | "connectorId">
+> = {
+  id: "einvoice",
+  name: "E-Invoice",
+  async sync(config, cursor) {
+    if (config.mobile && config.password) {
+      return syncTaiwanEInvoices(config, cursor);
+    }
+
+    return {
+      records: config.records.map((record) => ({
+        sourceId: record.sourceId,
+        invoiceNumber: record.invoiceNumber,
+        invoiceDate: normalizeInvoiceDate(record.invoiceDate),
+        sellerName: record.sellerName,
+        amount: record.amount,
+        raw: record.raw ?? record,
+      })),
+      cursor,
+    };
+  },
+};
+
+async function syncTaiwanEInvoices(config: InvoiceConfig, cursor?: string) {
+  return syncTaiwanEInvoicesV2(config, cursor);
+}
+
+async function syncTaiwanEInvoicesV2(config: InvoiceConfig, cursor?: string) {
+  const initialized = await initializeEInvoiceSync(config);
+  Object.assign(config, initialized.configUpdates);
+  const details: EInvoiceDetailResult[] = [];
+  for (const task of initialized.detailTasks) {
+    details.push(await fetchEInvoiceInvoiceDetail(initialized.session, task));
+  }
+  const detailsBySourceId = new Map(
+    details.map((detail) => [detail.invoice.sourceId, detail]),
+  );
+  const records = initialized.headers.map((header) => {
+    const detail = detailsBySourceId.get(header.sourceId);
+    return {
+      ...header.invoice,
+      raw: {
+        ...(header.invoice.raw as Record<string, unknown>),
+        detail: detail?.detail,
+        detailItems: detail?.detailItems ?? [],
+      },
+    };
+  });
+  const invoiceLineItems = details.flatMap((detail) => detail.invoiceLineItems);
+  const now = new Date();
+  const currentIndex = currentPeriodIndex(now);
+
+  return {
+    records: dedupeInvoices(records),
+    invoiceLineItems: dedupeInvoiceLineItems(invoiceLineItems),
+    detailErrorCount: 0,
+    cursor: JSON.stringify({
+      syncedAt: now.toISOString(),
+      previousSyncedAt: cursor ? readPreviousSyncedAt(cursor) : undefined,
+      latestPeriodIndex: currentIndex,
+      syncedPeriods: EINVOICE_SYNC_PERIODS,
+    }),
+  };
+}
+
+/**
+ * Login (or restore a persisted session) and retrieve headers for exactly the
+ * fixed two invoice periods. No detail request is made here.
+ */
+export async function initializeEInvoiceSync(
+  config: InvoiceConfig,
+  options: EInvoicePrimitiveOptions = {},
+): Promise<EInvoiceSyncInitialization> {
+  if (!config.mobile || !config.password) {
+    throw new Error("新版電子發票需要手機號碼與密碼。");
+  }
+
+  const client =
+    options.client ??
+    new EInvoiceV2Client({
+      androidId: config.androidId,
+      loginClientCode: config.loginClientCode,
+      ptoken: config.ptoken,
+    });
+  const session = jsonEInvoiceSession(await getEInvoiceSession(config, client));
+  const carrierCode = config.mobileBarcode ?? session.carrierCode;
+  if (!carrierCode) throw new Error("新版電子發票登入未回傳手機條碼。");
+  session.carrierCode = carrierCode;
+
+  const now = options.now ?? new Date();
+  const currentIndex = currentPeriodIndex(now);
+  const headers: EInvoiceInvoiceHeader[] = [];
+  for (let offset = 0; offset < EINVOICE_SYNC_PERIODS; offset += 1) {
+    const period = periodFromIndex(currentIndex - offset, now);
+    const payload = await client.queryCarrierInvoices(
+      session,
+      period.startDate,
+      period.endDate,
+    );
+    for (const invoice of getV2Invoices(payload)) {
+      const sourceId = invoiceSourceId(
+        invoice.invNum,
+        invoice.invDate,
+        invoice.id,
+      );
+      headers.push({
+        sourceId,
+        invNum: invoice.invNum,
+        detailInvDate: invoice.detailInvDate,
+        invoice: {
+          sourceId,
+          invoiceNumber: invoice.invNum || undefined,
+          invoiceDate: invoice.invoiceDate,
+          sellerName: invoice.sellerName,
+          amount: Math.max(0, Math.trunc(invoice.amount)),
+          raw: { invoice, period },
+        },
+        period,
+      });
+    }
+  }
+
+  return {
+    session,
+    configUpdates: sessionConfigUpdates(session),
+    headers,
+    detailTasks: headers.filter((header): header is EInvoiceDetailTask =>
+      Boolean(header.invNum && header.detailInvDate),
+    ),
+  };
+}
+
+/**
+ * Fetch and normalize one invoice's detail. Errors deliberately propagate so
+ * Queue chunks and the legacy full sync cannot report a partial success.
+ */
+export async function fetchEInvoiceInvoiceDetail(
+  session: EInvoiceV2Session,
+  task: EInvoiceDetailTask,
+  options: EInvoicePrimitiveOptions = {},
+): Promise<EInvoiceDetailResult> {
+  const client = options.client ?? new EInvoiceV2Client();
+  const detail = await client.queryCarrierInvoiceDetail(
+    session,
+    task.invNum,
+    task.detailInvDate,
+  );
+  const detailItems = getV2DetailItems(detail);
+  return {
+    invoice: task.invoice,
+    detail,
+    detailItems,
+    invoiceLineItems: detailItems.map((item, index) => ({
+      invoiceSourceId: task.sourceId,
+      sourceId: item.id || String(index + 1),
+      lineNumber: index + 1,
+      description: item.description || "未命名品項",
+      quantity: parseOptionalNumber(item.quantity),
+      unitPrice: parseOptionalInteger(item.unitPrice),
+      amount: parseRequiredInteger(item.amount),
+      raw: item,
+    })),
+  };
+}
+
+async function getEInvoiceSession(
+  config: InvoiceConfig,
+  client: EInvoiceV2Client,
+) {
+  if (
+    config.sid &&
+    config.token &&
+    config.loginAppId &&
+    config.loginLiat != null &&
+    config.loginSsMe
+  ) {
+    return {
+      sid: config.sid,
+      token: config.token,
+      iv: config.iv,
+      svrCode: config.svrCode,
+      clientCode: config.loginClientCode,
+      loginAppId: config.loginAppId,
+      loginLiat: config.loginLiat,
+      loginSsMe: config.loginSsMe,
+      ltoken: config.ltoken,
+      hkey: config.hkey,
+      serverTimeOffset: config.serverTimeOffset,
+      carrierCode: config.mobileBarcode,
+    } satisfies EInvoiceV2Session;
+  }
+  try {
+    return await client.login({
+      mobile: config.mobile!,
+      password: config.password!,
+      androidId: config.androidId,
+      loginClientCode: config.loginClientCode,
+      ptoken: config.ptoken,
+      loginType: config.loginType,
+      carrierCode: config.mobileBarcode,
+    });
+  } catch (error) {
+    throw new Error(
+      `電子發票登入失敗：${error instanceof Error ? error.message : "發生未知錯誤"}`,
+    );
+  }
+}
+
+function sessionConfigUpdates(
+  session: EInvoiceV2Session,
+): EInvoiceSessionConfigUpdates {
+  return {
+    sid: session.sid,
+    token: session.token,
+    loginAppId: session.loginAppId,
+    loginLiat: session.loginLiat,
+    loginSsMe: session.loginSsMe,
+    ...(session.iv === undefined ? {} : { iv: session.iv }),
+    ...(session.svrCode === undefined ? {} : { svrCode: session.svrCode }),
+    ...(session.ltoken === undefined ? {} : { ltoken: session.ltoken }),
+    ...(session.hkey === undefined ? {} : { hkey: session.hkey }),
+    ...(session.serverTimeOffset === undefined
+      ? {}
+      : { serverTimeOffset: session.serverTimeOffset }),
+    ...(session.clientCode === undefined
+      ? {}
+      : { loginClientCode: session.clientCode }),
+    ...(session.carrierCode === undefined
+      ? {}
+      : { mobileBarcode: session.carrierCode }),
+  };
+}
+
+function jsonEInvoiceSession(session: EInvoiceV2Session): EInvoiceV2Session {
+  return {
+    sid: session.sid,
+    token: session.token,
+    loginAppId: session.loginAppId,
+    loginLiat: session.loginLiat,
+    loginSsMe: session.loginSsMe,
+    ...(session.iv === undefined ? {} : { iv: session.iv }),
+    ...(session.svrCode === undefined ? {} : { svrCode: session.svrCode }),
+    ...(session.clientCode === undefined
+      ? {}
+      : { clientCode: session.clientCode }),
+    ...(session.ltoken === undefined ? {} : { ltoken: session.ltoken }),
+    ...(session.hkey === undefined ? {} : { hkey: session.hkey }),
+    ...(session.carrierCode === undefined
+      ? {}
+      : { carrierCode: session.carrierCode }),
+    ...(session.serverTimeOffset === undefined
+      ? {}
+      : { serverTimeOffset: session.serverTimeOffset }),
+  };
+}
+
+function getV2Invoices(payload: unknown) {
+  const rows = findArray(payload, [
+    "invoices",
+    "invoice",
+    "invoiceList",
+    "invList",
+    "headers",
+    "header",
+    "invoiceHeaders",
+    "details",
+    "result",
+    "data",
+    "list",
+  ]);
+  return rows
+    .filter((item): item is Record<string, unknown> =>
+      Boolean(item && typeof item === "object"),
+    )
+    .map((item, index) => {
+      const invoiceDate = parseV2InvoiceDate(
+        item.invDate ?? item.invoiceDate ?? item.date,
+      );
+      return {
+        id:
+          firstStringValue(item.invNum, item.invoiceNumber, item.id) ||
+          `v2-${index}`,
+        invNum: firstStringValue(item.invNum, item.invoiceNumber),
+        invDate: invoiceDate.iso,
+        invoiceDate: invoiceDate.normalized,
+        detailInvDate: invoiceDate.apiDate,
+        sellerName:
+          firstStringValue(item.sellerName, item.seller, item.sellerNameE) ||
+          "未知商店",
+        amount: parseNumericValue(item.amount, item.total, item.totalAmount),
+        randomNumber: firstStringValue(item.randomNumber),
+        invPeriod: firstStringValue(item.invPeriod, item.invTerm),
+        sellerID: firstStringValue(item.sellerID, item.sellerBan),
+        encrypt: firstStringValue(item.encrypt),
+        isQrCode: item.isQrCode === true || item.isScanInv === true,
+        isBuyerType: item.isBuyerType === true || item.isBuyerType === "Y",
+      };
+    });
+}
+
+function parseV2InvoiceDate(value: unknown) {
+  if (typeof value === "string" && value.trim()) {
+    const iso = legacyInvoiceIdentityDate(value);
+    const normalized = normalizeInvoiceDate(value);
+    return {
+      iso,
+      apiDate: /^\d{4}-\d{2}-\d{2}$/.test(normalized)
+        ? normalized.replace(/-/g, "/")
+        : formatTaipeiApiDate(new Date(normalized)),
+      normalized,
+    };
+  }
+
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const epoch = Number(record?.time);
+  if (Number.isFinite(epoch) && epoch > 0) {
+    const date = new Date(epoch);
+    return {
+      iso: date.toISOString(),
+      apiDate: formatTaipeiApiDate(date),
+      normalized: date.toISOString(),
+    };
+  }
+
+  const rocYear = Number(record?.year);
+  const month = Number(record?.month);
+  const day = Number(record?.date);
+  if (
+    Number.isFinite(rocYear) &&
+    Number.isFinite(month) &&
+    Number.isFinite(day)
+  ) {
+    const year = rocYear < 1911 ? rocYear + 1911 : rocYear;
+    const apiDate = `${year}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}`;
+    return {
+      iso: legacyInvoiceIdentityDate(apiDate),
+      apiDate,
+      normalized: normalizeInvoiceDate(apiDate),
+    };
+  }
+
+  return { iso: "", apiDate: "", normalized: "" };
+}
+
+function formatTaipeiApiDate(date: Date) {
+  if (Number.isNaN(date.getTime())) return "";
+  const taipei = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return `${taipei.getUTCFullYear()}/${String(taipei.getUTCMonth() + 1).padStart(2, "0")}/${String(taipei.getUTCDate()).padStart(2, "0")}`;
+}
+
+function getV2DetailItems(payload: unknown) {
+  const rows = findArray(payload, [
+    "details",
+    "items",
+    "itemList",
+    "invoiceDetails",
+    "result",
+    "data",
+    "list",
+  ]);
+  return rows
+    .filter((item): item is Record<string, unknown> =>
+      Boolean(item && typeof item === "object"),
+    )
+    .map((item, index) => ({
+      id: firstStringValue(item.rowNum, item.id) || String(index),
+      amount: firstStringValue(item.amount, item.subtotal),
+      description:
+        firstStringValue(item.description, item.itemName, item.name) ||
+        "未命名品項",
+      quantity: firstStringValue(item.quantity, item.qty),
+      unitPrice: firstStringValue(item.unitPrice, item.price),
+    }));
+}
+
+function findArray(value: unknown, keys: string[], depth = 0): unknown[] {
+  if (depth > 5 || value == null) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
+  }
+  for (const child of Object.values(record)) {
+    const found = findArray(child, keys, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function firstStringValue(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value === "number" && Number.isFinite(value))
+      return String(value);
+  }
+  return "";
+}
+
+function parseNumericValue(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = Number(String(value ?? "").replace(/,/g, ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function parseOptionalNumber(value: string) {
+  const normalized = value.trim().replace(/,/g, "");
+  if (!normalized) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseOptionalInteger(value: string) {
+  const parsed = parseOptionalNumber(value);
+  return parsed === undefined ? undefined : Math.trunc(parsed);
+}
+
+function parseRequiredInteger(value: string) {
+  return parseOptionalInteger(value) ?? 0;
+}
+
+function readPreviousSyncedAt(cursor: string) {
+  try {
+    const parsed = JSON.parse(cursor) as { syncedAt?: unknown };
+    return typeof parsed.syncedAt === "string" ? parsed.syncedAt : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function invoiceSourceId(invNum: string, invDate: string, fallback: string) {
+  return [invNum || fallback, invDate].filter(Boolean).join(":");
+}
+
+function normalizeInvoiceDate(value: string) {
+  const normalized = value
+    .trim()
+    .replace(/\//g, "-")
+    .replace(" ", "T")
+    .replace(
+      /^(\d{4})-(\d{1,2})-(\d{1,2})(?=T|$)/,
+      (_, year: string, month: string, day: string) =>
+        `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`,
+    );
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return normalized;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(normalized)) return normalized;
+  const day = normalized.slice(0, 10);
+  const calendarDate = new Date(`${day}T00:00:00Z`);
+  if (
+    !Number.isFinite(calendarDate.getTime()) ||
+    !calendarDate.toISOString().startsWith(day) ||
+    Number(normalized.slice(11, 13)) >= 24
+  )
+    return day;
+  const timestamp = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized)
+    ? normalized
+    : `${normalized}+08:00`;
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime())
+    ? normalized.slice(0, 10)
+    : date.toISOString();
+}
+
+// Keep the original source-id representation even when display dates gain precision.
+function legacyInvoiceIdentityDate(value: string) {
+  const normalized = value.trim().replace(/\//g, "-");
+  const withTime = /^\d{4}-\d{2}-\d{2}$/.test(normalized)
+    ? `${normalized}T00:00:00`
+    : normalized.replace(" ", "T");
+  const date = new Date(withTime);
+  if (Number.isNaN(date.getTime())) return normalized || value;
+  return date.toISOString();
+}
+
+function dedupeInvoices(records: Array<Omit<Invoice, "id" | "connectorId">>) {
+  const bySourceId = new Map<string, Omit<Invoice, "id" | "connectorId">>();
+  for (const record of records) {
+    bySourceId.set(record.sourceId, record);
+  }
+  return Array.from(bySourceId.values());
+}
+
+function dedupeInvoiceLineItems(
+  items: Array<Omit<InvoiceLineItem, "id" | "connectorId" | "invoiceId">>,
+) {
+  const bySourceId = new Map<
+    string,
+    Omit<InvoiceLineItem, "id" | "connectorId" | "invoiceId">
+  >();
+  for (const item of items) {
+    bySourceId.set(`${item.invoiceSourceId}:${item.sourceId}`, item);
+  }
+  return Array.from(bySourceId.values());
+}

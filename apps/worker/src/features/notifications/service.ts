@@ -2,8 +2,8 @@ import type {
   NotificationConfig,
   NotificationPreferences,
   PushSubscriptionInput,
-} from "@taiwan-fin-hub/core";
-import { sanitizeDatabaseError } from "@taiwan-fin-hub/db";
+} from "@taiwan-fin-hub/shared";
+import { sanitizeDatabaseError } from "../../db";
 import { configEncryptionKey } from "../../platform/config";
 import { decryptJson, encryptJson } from "../../platform/crypto";
 import type { Env } from "../../platform/env";

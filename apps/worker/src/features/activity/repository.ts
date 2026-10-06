@@ -4,7 +4,7 @@ import {
   bankTransactions,
   invoiceTransactionPreferences,
   invoices,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import {
   and,
   asc,

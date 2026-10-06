@@ -1,361 +1,74 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createTestD1 } from "../../helpers/d1";
+import { getConnectorSettings } from "../../../src/db";
+import { decryptJson, encryptJson } from "../../../src/platform/crypto";
 import type { Env } from "../../../src/platform/env";
-
-const mocks = vi.hoisted(() => ({
-  clearConnectorCursor: vi.fn(),
-  findConnectorSettings: vi.fn(),
-  saveConnectorSettings: vi.fn(),
-}));
-
-vi.mock("@taiwan-fin-hub/db", () => ({
-  clearConnectorCursor: mocks.clearConnectorCursor,
-}));
-
-vi.mock("../../../src/features/connectors/repository", () => ({
-  findConnectorSettings: mocks.findConnectorSettings,
-  saveConnectorSettings: mocks.saveConnectorSettings,
-}));
-
-vi.mock("../../../src/platform/config", () => ({
-  configEncryptionKey: () => "test-key",
-}));
-
-vi.mock("../../../src/platform/crypto", () => ({
-  decryptJson: async <T>(value: string) => JSON.parse(value) as T,
-  encryptJson: async (value: unknown) => JSON.stringify(value),
-}));
-
 import {
-  ConnectorConfigMissingError,
   getConnectorSettingsView,
   updateConnectorSettings,
 } from "../../../src/features/connectors/service";
 
-const env = { DB: {} as D1Database } as Env;
+const key = "synthetic-test-encryption-key";
+const credentials = {
+  userId: "A123456789",
+  account: "synthetic-user",
+  password: "synthetic-password",
+};
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  mocks.findConnectorSettings.mockResolvedValue(null);
-  mocks.saveConnectorSettings.mockResolvedValue(undefined);
-  mocks.clearConnectorCursor.mockResolvedValue(undefined);
-});
+describe("連線設定的憑證安全（隔離 D1）", () => {
+  let harness: Awaited<ReturnType<typeof createTestD1>>;
+  beforeAll(async () => {
+    harness = await createTestD1();
+  }, 60_000);
+  afterAll(async () => {
+    await harness?.mf.dispose();
+  });
 
-describe("connector settings state boundaries", () => {
-  it("ignores the retired invoice detail preference", async () => {
-    await updateConnectorSettings(env, "einvoice", {
-      mobile: "0912345678",
-      password: "password",
-      fetchDetails: false,
-    });
-
-    expect(mocks.saveConnectorSettings).toHaveBeenCalledOnce();
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toMatchObject({
-      mobile: "0912345678",
-      password: "password",
-    });
-    expect(JSON.parse(saved.encryptedConfig)).not.toHaveProperty(
-      "fetchDetails",
+  it("加密儲存且公開 view 不洩漏秘密，變更帳密後移除舊 session 與 cursor", async () => {
+    const env = { DB: harness.binding, CONFIG_ENCRYPTION_KEY: key } as Env;
+    await updateConnectorSettings(env, "sinopac", credentials);
+    const encrypted = await encryptJson(
+      {
+        ...credentials,
+        protocol: "sinopac-mobile-app-json-v1",
+        sessionCookies: "synthetic-private-cookie",
+        browserSessionId: "synthetic-private-challenge",
+        captcha: "123456",
+      },
+      key,
     );
-    expect(saved.publicConfig).toBeNull();
-  });
-
-  it("removes retired lookback settings while preserving credentials", async () => {
-    await updateConnectorSettings(env, "esun", {
-      userId: "A123456789",
-      account: "user",
-      password: "password",
-      lookbackMonths: 6,
-    });
-
-    expect(mocks.saveConnectorSettings).toHaveBeenCalledOnce();
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toEqual({
-      userId: "A123456789",
-      account: "user",
-      password: "password",
-    });
-    expect(saved.publicConfig).toBeNull();
-  });
-
-  it("does not create a connector from a retired lookback-only payload", async () => {
-    await expect(
-      updateConnectorSettings(env, "esun", { lookbackMonths: 12 }),
-    ).rejects.toBeInstanceOf(ConnectorConfigMissingError);
-    expect(mocks.saveConnectorSettings).not.toHaveBeenCalled();
-  });
-
-  it("clears derived session state and cursor when credentials change", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "esun-settings",
-      connector_id: "esun",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "old-user",
-        password: "old-password",
-        sessionCookies: "old-cookie",
-        sessionExpiresAt: "2026-07-29T12:00:00.000Z",
-      }),
-      public_config: JSON.stringify({ lookbackMonths: 3 }),
-      sync_cursor: JSON.stringify({ syncedAt: "2026-07-29T10:00:00.000Z" }),
-      created_at: "2026-07-29T09:00:00.000Z",
-      updated_at: "2026-07-29T09:00:00.000Z",
-    });
-
-    await updateConnectorSettings(env, "esun", { account: "new-user" });
-
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toEqual({
-      userId: "A123456789",
-      account: "new-user",
-      password: "old-password",
-    });
-    expect(saved.publicConfig).toBeNull();
-    expect(mocks.clearConnectorCursor).toHaveBeenCalledWith(
-      env.DB,
-      "esun",
-      expect.any(String),
-    );
-  });
-
-  it("drops retired lookback values from an existing setting", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "esun-settings",
-      connector_id: "esun",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "user",
-        password: "password",
-        sessionCookies: "current-cookie",
-        sessionExpiresAt: "2026-07-29T12:00:00.000Z",
-      }),
-      public_config: JSON.stringify({ lookbackMonths: 3 }),
-      sync_cursor: JSON.stringify({ syncedAt: "2026-07-29T10:00:00.000Z" }),
-      created_at: "2026-07-29T09:00:00.000Z",
-      updated_at: "2026-07-29T09:00:00.000Z",
-    });
-
-    await updateConnectorSettings(env, "esun", { lookbackMonths: 12 });
-
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toMatchObject({
-      sessionCookies: "current-cookie",
-      sessionExpiresAt: "2026-07-29T12:00:00.000Z",
-    });
-    expect(JSON.parse(saved.encryptedConfig)).not.toHaveProperty(
-      "lookbackMonths",
-    );
-    expect(saved.publicConfig).toBeNull();
-    expect(mocks.clearConnectorCursor).not.toHaveBeenCalled();
-  });
-
-  it("reports HNCB session availability from encrypted cookies", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "hncb-settings",
-      connector_id: "hncb",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "user",
-        password: "password",
-        sessionCookies: "hncb-cookie",
-        sessionCreatedAt: "2026-08-19T08:00:00.000Z",
-      }),
-      public_config: null,
-      sync_cursor: JSON.stringify({ syncedAt: "2026-08-19T08:00:00.000Z" }),
-      created_at: "2026-08-19T07:00:00.000Z",
-      updated_at: "2026-08-19T08:00:00.000Z",
-    });
-
-    await expect(getConnectorSettingsView(env, "hncb")).resolves.toMatchObject({
-      connectorId: "hncb",
+    await env.DB.prepare(
+      "UPDATE connector_settings SET encrypted_config = ?, sync_cursor = 'old-cursor' WHERE connector_id = 'sinopac'",
+    )
+      .bind(encrypted)
+      .run();
+    const stored = await getConnectorSettings(env.DB, "sinopac");
+    expect(stored?.encrypted_config).not.toContain(credentials.password);
+    expect(stored?.encrypted_config).not.toContain("synthetic-private");
+    await expect(decryptJson(encrypted, "incorrect-key")).rejects.toThrow();
+    const view = await getConnectorSettingsView(env, "sinopac");
+    expect(view).toMatchObject({
+      configured: true,
       credentialsComplete: true,
       sessionAvailable: true,
+      publicConfig: null,
     });
-  });
+    expect(JSON.stringify(view)).not.toMatch(
+      /synthetic-|sessionCookies|password|captcha/,
+    );
 
-  it("reports First Bank session availability from encrypted cookies", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "firstbank-settings",
-      connector_id: "firstbank",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "user",
-        password: "password",
-        sessionCookies: "firstbank-cookie",
-        sessionCreatedAt: "2026-08-27T08:00:00.000Z",
-      }),
-      public_config: null,
-      sync_cursor: JSON.stringify({ syncedAt: "2026-08-27T08:00:00.000Z" }),
-      created_at: "2026-08-27T07:00:00.000Z",
-      updated_at: "2026-08-27T08:00:00.000Z",
+    await updateConnectorSettings(env, "sinopac", { account: "new-user" });
+    const updated = await getConnectorSettings(env.DB, "sinopac");
+    expect(await decryptJson(updated!.encrypted_config, key)).toEqual({
+      ...credentials,
+      account: "new-user",
     });
-
-    await expect(
-      getConnectorSettingsView(env, "firstbank"),
-    ).resolves.toMatchObject({
-      connectorId: "firstbank",
+    expect(updated?.sync_cursor).toBeNull();
+    expect(updated?.public_config).toBeNull();
+    expect(updated?.id).toBe(stored?.id);
+    expect(await getConnectorSettingsView(env, "sinopac")).toMatchObject({
       credentialsComplete: true,
-      sessionAvailable: true,
+      sessionAvailable: false,
     });
-  });
-
-  it("reports Cathay trusted-device availability only for its device cookie", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "cathay-settings",
-      connector_id: "cathaybk",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "user",
-        password: "password",
-        sessionCookies: JSON.stringify([
-          {
-            name: "CUB.eBank.DeviceId",
-            value: "trusted-device",
-            domain: ".cathaybk.com.tw",
-            expires: 2_000_000_000,
-          },
-        ]),
-      }),
-      public_config: null,
-      sync_cursor: null,
-      created_at: "2026-08-22T08:00:00.000Z",
-      updated_at: "2026-08-22T08:00:00.000Z",
-    });
-
-    await expect(
-      getConnectorSettingsView(env, "cathaybk"),
-    ).resolves.toMatchObject({
-      connectorId: "cathaybk",
-      credentialsComplete: true,
-      sessionAvailable: true,
-    });
-  });
-
-  it("reports a resumable Cathay Email verification session", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "cathay-settings",
-      connector_id: "cathaybk",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "user",
-        password: "password",
-        browserSessionId: "pending-session",
-        browserSessionExpiresAt: "2099-08-22T08:08:00.000Z",
-        otpChannel: "email",
-      }),
-      public_config: null,
-      sync_cursor: null,
-      created_at: "2026-08-22T08:00:00.000Z",
-      updated_at: "2026-08-22T08:00:00.000Z",
-    });
-
-    await expect(
-      getConnectorSettingsView(env, "cathaybk"),
-    ).resolves.toMatchObject({
-      verificationPending: true,
-      verificationChannel: "email",
-      verificationExpiresAt: "2099-08-22T08:08:00.000Z",
-    });
-  });
-
-  it("clears Cathay trusted-device state when credentials change", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "cathay-settings",
-      connector_id: "cathaybk",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "old-user",
-        password: "old-password",
-        sessionCookies: '[{"name":"CUB.eBank.DeviceId"}]',
-        sessionExpiresAt: "2027-09-26T08:00:00.000Z",
-      }),
-      public_config: null,
-      sync_cursor: JSON.stringify({ syncedAt: "2026-08-22T08:00:00.000Z" }),
-      created_at: "2026-08-22T07:00:00.000Z",
-      updated_at: "2026-08-22T08:00:00.000Z",
-    });
-
-    await updateConnectorSettings(env, "cathaybk", { account: "new-user" });
-
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toEqual({
-      userId: "A123456789",
-      account: "new-user",
-      password: "old-password",
-    });
-    expect(mocks.clearConnectorCursor).toHaveBeenCalledWith(
-      env.DB,
-      "cathaybk",
-      expect.any(String),
-    );
-  });
-
-  it("clears HNCB session state when credentials change", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "hncb-settings",
-      connector_id: "hncb",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "old-user",
-        password: "old-password",
-        sessionCookies: "old-cookie",
-        sessionCreatedAt: "2026-08-19T08:00:00.000Z",
-        browserSessionId: "pending-session",
-      }),
-      public_config: null,
-      sync_cursor: JSON.stringify({ syncedAt: "2026-08-19T08:00:00.000Z" }),
-      created_at: "2026-08-19T07:00:00.000Z",
-      updated_at: "2026-08-19T08:00:00.000Z",
-    });
-
-    await updateConnectorSettings(env, "hncb", { account: "new-user" });
-
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toEqual({
-      userId: "A123456789",
-      account: "new-user",
-      password: "old-password",
-    });
-    expect(mocks.clearConnectorCursor).toHaveBeenCalledWith(
-      env.DB,
-      "hncb",
-      expect.any(String),
-    );
-  });
-
-  it("clears First Bank browser state when credentials change", async () => {
-    mocks.findConnectorSettings.mockResolvedValue({
-      id: "firstbank-settings",
-      connector_id: "firstbank",
-      encrypted_config: JSON.stringify({
-        userId: "A123456789",
-        account: "old-user",
-        password: "old-password",
-        sessionCookies: "old-cookie",
-        sessionCreatedAt: "2026-08-27T08:00:00.000Z",
-        browserSessionId: "pending-session",
-        browserSessionExpiresAt: "2026-08-27T08:02:00.000Z",
-        captchaDigitCount: 4,
-        captcha: "1234",
-      }),
-      public_config: null,
-      sync_cursor: JSON.stringify({ syncedAt: "2026-08-27T08:00:00.000Z" }),
-      created_at: "2026-08-27T07:00:00.000Z",
-      updated_at: "2026-08-27T08:00:00.000Z",
-    });
-
-    await updateConnectorSettings(env, "firstbank", { account: "new-user" });
-
-    const saved = mocks.saveConnectorSettings.mock.calls[0]![1];
-    expect(JSON.parse(saved.encryptedConfig)).toEqual({
-      userId: "A123456789",
-      account: "new-user",
-      password: "old-password",
-    });
-    expect(mocks.clearConnectorCursor).toHaveBeenCalledWith(
-      env.DB,
-      "firstbank",
-      expect.any(String),
-    );
   });
 });

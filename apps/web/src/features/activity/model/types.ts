@@ -1,5 +1,5 @@
-import type { ActivityItem } from "@taiwan-fin-hub/core";
-export type { ActivityItem } from "@taiwan-fin-hub/core";
+import type { ActivityItem } from "@taiwan-fin-hub/shared";
+export type { ActivityItem } from "@taiwan-fin-hub/shared";
 
 export interface PendingCategoryUpdate {
   item: ActivityItem;

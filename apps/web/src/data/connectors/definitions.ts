@@ -1,8 +1,7 @@
 import {
   connectorCatalog,
-  supportedConnectorIds,
   type ConnectorFormFieldKey,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import type { ConnectorField, ConnectorId } from "./types";
 
 export interface ConnectorDefinition {
@@ -11,12 +10,9 @@ export interface ConnectorDefinition {
   description: string;
 }
 
-export const connectorDefinitions: ConnectorDefinition[] =
-  supportedConnectorIds.map((id) => ({
-    id,
-    title: connectorCatalog[id].title,
-    description: connectorCatalog[id].description,
-  }));
+export const connectorDefinitions: ConnectorDefinition[] = Object.values(
+  connectorCatalog,
+).map(({ id, title, description }) => ({ id, title, description }));
 
 type ConnectorFieldMap = {
   [TConnectorId in ConnectorId]: Array<
@@ -73,6 +69,11 @@ export const connectorFields = {
     { key: "account", label: "使用者代號", type: "text" },
     { key: "password", label: "網路銀行密碼", type: "password" },
   ],
+  nextbank: [
+    { key: "userId", label: "身分證字號", type: "text" },
+    { key: "account", label: "使用者代號", type: "text" },
+    { key: "password", label: "使用者密碼", type: "password" },
+  ],
   kgibank: [
     { key: "userId", label: "身分證字號", type: "text" },
     { key: "account", label: "使用者代號", type: "text" },
@@ -82,5 +83,15 @@ export const connectorFields = {
     { key: "userId", label: "身分證字號／統編", type: "text" },
     { key: "account", label: "登入代號", type: "text" },
     { key: "password", label: "網路銀行密碼", type: "password" },
+  ],
+  rakuten: [
+    { key: "userId", label: "身分證字號", type: "text" },
+    { key: "account", label: "使用者代號", type: "text" },
+    { key: "password", label: "登入密碼", type: "password" },
+  ],
+  megabank: [
+    { key: "userId", label: "身分證字號／居留證號", type: "text" },
+    { key: "account", label: "使用者代號", type: "text" },
+    { key: "password", label: "行動銀行登入密碼", type: "password" },
   ],
 } satisfies ConnectorFieldMap;

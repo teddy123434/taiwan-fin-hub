@@ -8,7 +8,7 @@ import {
   matchInvoicesToTransactions,
   type ActivityItem,
   type ActivityOrderKey,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import { listBankAccounts } from "../bank/repository";
 import { normalizeBankAccountDisplay } from "../bank/display";
 import { getBankRange } from "../bank/service";

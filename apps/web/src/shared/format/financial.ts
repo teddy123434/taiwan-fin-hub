@@ -79,10 +79,10 @@ export function todayStr() {
 }
 
 export function formatBankAccountName(account: {
-  accountName?: string;
-  sourceId?: string;
-  accountSourceId?: string;
-  accountType?: string;
+  accountName?: string | null;
+  sourceId?: string | null;
+  accountSourceId?: string | null;
+  accountType?: string | null;
 }) {
   if (account.accountType === "credit")
     return (

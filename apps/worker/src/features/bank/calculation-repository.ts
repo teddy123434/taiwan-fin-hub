@@ -2,7 +2,7 @@ import {
   createDrizzle,
   bankTransactionPreferences,
   bankTransactions,
-} from "@taiwan-fin-hub/db";
+} from "../../db";
 import { and, eq, sql } from "drizzle-orm";
 
 export async function bankTransactionExists(

@@ -1,4 +1,4 @@
-import type { ActivityItem } from "@taiwan-fin-hub/core";
+import type { ActivityItem } from "@taiwan-fin-hub/shared";
 import { infiniteQueryOptions } from "@tanstack/svelte-query";
 import type { ApiClient } from "@/shared/api/client";
 import type { BankData } from "@/data/bank/types";

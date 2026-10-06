@@ -9,7 +9,7 @@ import type {
   Invoice,
   InvoiceLineItem,
   NetWorthHistoryPoint,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 import { deriveBankMatchKey } from "../bank/display";
 import type { SyncWriteRecord } from "./persistence";
 

@@ -3,4 +3,4 @@ export {
   matchInvoicesToTransactions,
   invoiceTransactionCandidates,
   type InvoiceTransactionMatches,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";

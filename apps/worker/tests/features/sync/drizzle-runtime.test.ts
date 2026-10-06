@@ -1,11 +1,31 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createTestD1 } from "../../../../../packages/db/testing/d1";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { createTestD1 } from "../../helpers/d1";
 import {
   acquireSyncJobLock,
   renewSyncJobLock,
   releaseSyncJobLock,
-  findNextDueSyncJob,
-} from "@taiwan-fin-hub/db";
+  completeSyncJob,
+  failSyncJob,
+} from "../../../src/db";
+import * as dbApi from "../../../src/db";
+import { findSyncJob } from "../../../src/features/sync/scheduling/repository";
+import { getSyncJobs } from "../../../src/features/sync/scheduling/service";
+import { recoverStalledSyncRuns } from "../../../src/features/sync/scheduling/recovery";
+import {
+  createSyncExecution,
+  guardSyncDatabase,
+  SyncLockLostError,
+  SyncTimeoutError,
+} from "../../../src/features/sync/execution";
+import type { Env } from "../../../src/platform/env";
 import {
   acquireEinvoiceRunChunkLease,
   renewEinvoiceRunChunkLease,
@@ -13,34 +33,26 @@ import {
   createOrGetActiveEinvoiceRun,
   completeEinvoiceRun,
   claimEinvoiceRunSessionRefresh,
-  getEinvoiceRun,
-} from "../../../src/features/sync/einvoice-run-repository";
+} from "../../../src/sources/einvoice/run-repository";
 import {
   acquireTdccRunLease,
   renewTdccRunLease,
   releaseTdccRunLease,
   createOrGetActiveTdccRun,
   updateTdccRunState,
-  transitionTdccRun,
   finalizeTdccRun,
-  getTdccRun,
   claimTdccRunSessionRefresh,
-} from "../../../src/features/sync/tdcc-run-repository";
+} from "../../../src/sources/tdcc/run-repository";
 import {
   stageSyncWriteRecords,
   promoteStagedSyncWrite,
 } from "../../../src/features/sync/persistence";
-import { connectorCursorStatement } from "../../../src/features/sync/repository";
-import {
-  findSyncJob,
-  findDefaultSyncSchedule,
-  listInheritedSyncJobs,
-  listSyncJobs,
-} from "../../../src/features/sync/schedule-repository";
+import { connectorCursorStatement } from "../../../src/features/sync/connector-repository";
+import { failTdccSyncRun } from "../../../src/sources/tdcc/sync";
 
 const now = "2026-09-13T00:00:00.000Z";
 
-describe("階段 4：隔離 D1 lease 與 promotion", () => {
+describe("同步鎖與原子寫入（隔離 D1）", () => {
   let harness: Awaited<ReturnType<typeof createTestD1>>;
   beforeAll(async () => {
     harness = await createTestD1();
@@ -102,104 +114,337 @@ describe("階段 4：隔離 D1 lease 與 promotion", () => {
     ).toBe(false);
   });
 
-  it("一般排程讀取保留 row shape、設定別名、排序及到期／lease 邊界", async () => {
+  it("鎖被接管後，舊同步不能寫入金融資料、cursor 或新工作的結果", async () => {
     const db = harness.binding;
     await db
       .prepare(
-        "INSERT INTO connector_settings (id, connector_id, encrypted_config, created_at, updated_at) VALUES ('tdcc', 'tdcc', 'synthetic', ?, ?)",
+        `INSERT INTO sync_jobs (id, connector_id, scope, interval_minutes, next_run_at, created_at, updated_at) VALUES ('einvoice:all', 'einvoice', 'all', 1440, ?, ?, ?)`,
       )
-      .bind(now, now)
+      .bind(now, now, now)
       .run();
-    for (const scope of ["bank", "all"]) {
-      await db
-        .prepare(
-          "INSERT INTO sync_jobs (id, connector_id, scope, interval_minutes, next_run_at, created_at, updated_at) VALUES (?, 'tdcc', ?, 1440, ?, ?, ?)",
-        )
-        .bind(`tdcc:${scope}`, scope, now, now, now)
-        .run();
-    }
-    const expected = await db
-      .prepare("SELECT * FROM sync_jobs WHERE id = 'tdcc:all'")
-      .first();
-    expect(await findSyncJob(db, "tdcc", "all")).toEqual(expected);
-    expect(await findSyncJob(db, "tdcc", "missing")).toBeNull();
-    expect(await findNextDueSyncJob(db, new Date(now), "inherit")).toEqual(
-      expected,
-    );
-    expect(await findNextDueSyncJob(db, new Date(now), "custom")).toBeNull();
-    expect(
-      await findNextDueSyncJob(db, new Date(Date.parse(now) - 1)),
-    ).toBeNull();
-    await db
-      .prepare("UPDATE sync_jobs SET locked_until = ? WHERE id = 'tdcc:all'")
-      .bind(now)
-      .run();
-    expect(await findNextDueSyncJob(db, new Date(now))).toMatchObject({
-      id: "tdcc:bank",
-    });
-    expect(
-      await findNextDueSyncJob(db, new Date(Date.parse(now) + 1)),
-    ).toMatchObject({ id: "tdcc:all" });
-    expect(
-      (await listSyncJobs(db)).map((row) => [row.id, row.configured]),
-    ).toEqual([
-      ["tdcc:all", 1],
-      ["tdcc:bank", 1],
-    ]);
-    await db.prepare("DELETE FROM connector_settings").run();
-    expect((await listSyncJobs(db)).every((row) => !row.configured)).toBe(true);
     await db
       .prepare(
-        "INSERT INTO connector_settings (id, connector_id, encrypted_config, created_at, updated_at) VALUES ('tdcc', 'tdcc', 'synthetic', ?, ?)",
+        `INSERT INTO connector_settings (id, connector_id, encrypted_config, sync_cursor, created_at, updated_at) VALUES ('einvoice', 'einvoice', 'config', 'old-cursor', ?, ?)`,
       )
       .bind(now, now)
       .run();
-    const configuredJobs = (await listSyncJobs(db)).filter(
-      (row) => row.configured && row.scope === "all",
+    const input = {
+      lockRowId: "einvoice:all",
+      scope: "all",
+      trigger: "manual" as const,
+      leaseMs: 60_000,
+    };
+    await acquireSyncJobLock(db, { ...input, runId: "old" });
+    const guarded = guardSyncDatabase(
+      db,
+      { lockRowId: input.lockRowId, runId: "old" },
+      new AbortController().signal,
     );
-    expect(configuredJobs).toEqual([
-      expect.objectContaining({ connectorId: "tdcc", configured: 1 }),
+    const record = {
+      entityType: "invoice" as const,
+      recordKey: "stale",
+      payload: {
+        id: "stale",
+        connector_id: "einvoice",
+        source_id: "stale",
+        invoice_date: "2026-10-05",
+        amount: 120,
+        created_at: now,
+        updated_at: now,
+      },
+    };
+    await stageSyncWriteRecords(guarded, "stale-write", [record]);
+    expect(
+      await promoteStagedSyncWrite(guarded, {
+        runId: "stale-write",
+        entityTypes: ["invoice"],
+        finalizeStatements: [
+          connectorCursorStatement(guarded, "einvoice", "current-cursor", now),
+        ],
+      }),
+    ).toEqual({ invoices: 1, bankTransactions: 0, investmentTransactions: 0 });
+    await stageSyncWriteRecords(guarded, "stale-write", [
+      { ...record, payload: { ...record.payload, amount: 999 } },
     ]);
+    await db
+      .prepare("UPDATE sync_jobs SET locked_until = ? WHERE id = ?")
+      .bind(now, input.lockRowId)
+      .run();
+    expect(await renewSyncJobLock(db, { ...input, runId: "old" })).toBe(false);
+    expect(await acquireSyncJobLock(db, { ...input, runId: "new" })).toBe(true);
+    await expect(
+      promoteStagedSyncWrite(guarded, {
+        runId: "stale-write",
+        entityTypes: ["invoice"],
+        finalizeStatements: [
+          connectorCursorStatement(guarded, "einvoice", "stale-cursor", now),
+        ],
+      }),
+    ).rejects.toBeInstanceOf(SyncLockLostError);
+    const job = (await findSyncJob(db, "einvoice", "all"))!;
+    expect(await completeSyncJob(db, job, "old")).toBe(false);
     expect(
-      (await listSyncJobs(db)).filter((row) => row.configured).length,
-    ).toBe(2);
-    expect(
-      (await listInheritedSyncJobs(db)).sort((a, b) =>
-        a.id.localeCompare(b.id),
+      await failSyncJob(
+        db,
+        job,
+        { status: "failed", errorMessage: "old error" },
+        "old",
       ),
-    ).toEqual([
-      { id: "tdcc:all", nextRunAt: now },
-      { id: "tdcc:bank", nextRunAt: now },
-    ]);
-    expect(await findDefaultSyncSchedule(db)).toEqual(
+    ).toBe(false);
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM invoices").first("count"),
+    ).toBe(1);
+    expect(
+      await db.prepare("SELECT amount FROM invoices").first("amount"),
+    ).toBe(120);
+    expect(
       await db
-        .prepare(
-          "SELECT interval_minutes AS intervalMinutes, preferred_time AS preferredTime, preferred_weekday AS preferredWeekday, timezone, updated_at AS updatedAt FROM sync_schedule_settings WHERE id = 'default'",
-        )
-        .first(),
-    );
+        .prepare("SELECT sync_cursor FROM connector_settings")
+        .first("sync_cursor"),
+    ).toBe("current-cursor");
+    expect(
+      await db.prepare("SELECT locked_by, last_status FROM sync_jobs").first(),
+    ).toEqual({ locked_by: "new", last_status: null });
   });
 
-  it("run 查詢保留完整 snake_case row 與 null，查無資料仍回傳 null", async () => {
+  it("失去續租或達到執行期限會停止等待，並拒絕遲到寫入", async () => {
     const db = harness.binding;
-    expect(await getEinvoiceRun(db, "missing")).toBeNull();
-    expect(await getTdccRun(db, "missing")).toBeNull();
-    await createOrGetActiveEinvoiceRun(db, {
-      id: "einvoice",
-      trigger: "manual",
-      now,
+    const controller = new AbortController();
+    const guarded = guardSyncDatabase(
+      db,
+      { lockRowId: "einvoice:all", runId: "run" },
+      controller.signal,
+    );
+    controller.abort(new SyncTimeoutError());
+    await expect(
+      guarded.prepare("DELETE FROM connector_settings").run(),
+    ).rejects.toBeInstanceOf(SyncTimeoutError);
+    const env = { DB: db } as Env;
+    const expired = createSyncExecution(
+      env,
+      { lockRowId: "einvoice:all", runId: "run" },
+      { deadline: Date.now() - 1 },
+    );
+    const task = vi.fn();
+    try {
+      await expect(expired.run(task)).rejects.toBeInstanceOf(SyncTimeoutError);
+      expect(task).not.toHaveBeenCalled();
+    } finally {
+      expired.stop();
+    }
+    vi.useFakeTimers();
+    const renew = vi.spyOn(dbApi, "renewSyncJobLock").mockResolvedValue(false);
+    const execution = createSyncExecution(env, {
+      lockRowId: "einvoice:all",
+      runId: "run",
     });
-    await createOrGetActiveTdccRun(db, { id: "tdcc", trigger: "manual", now });
-    expect(await getEinvoiceRun(db, "einvoice")).toEqual(
+    try {
+      const rejected = expect(
+        execution.run(() => new Promise<never>(() => {})),
+      ).rejects.toThrow("同步鎖已失效");
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await rejected;
+    } finally {
+      execution.stop();
+      renew.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["einvoice", "tdcc"] as const)(
+    "%s chunk 被另一個 invocation 接管後，舊 chunk 無法寫入",
+    async (connectorId) => {
+      const db = harness.binding;
+      const lockRowId = `${connectorId}:all`;
       await db
-        .prepare("SELECT * FROM einvoice_sync_runs WHERE id = 'einvoice'")
-        .first(),
-    );
-    expect(await getTdccRun(db, "tdcc")).toEqual(
+        .prepare(
+          `INSERT INTO sync_jobs (id, connector_id, scope, interval_minutes, next_run_at, created_at, updated_at)
+      VALUES (?, ?, 'all', 1440, ?, ?, ?)`,
+        )
+        .bind(lockRowId, connectorId, now, now, now)
+        .run();
       await db
-        .prepare("SELECT * FROM tdcc_sync_runs WHERE id = 'tdcc'")
-        .first(),
+        .prepare(
+          `INSERT INTO connector_settings (id, connector_id, encrypted_config, sync_cursor, created_at, updated_at)
+      VALUES (?, ?, 'config', 'old-cursor', ?, ?)`,
+        )
+        .bind(connectorId, connectorId, now, now)
+        .run();
+      const create =
+        connectorId === "einvoice"
+          ? createOrGetActiveEinvoiceRun
+          : createOrGetActiveTdccRun;
+      const acquire =
+        connectorId === "einvoice"
+          ? acquireEinvoiceRunChunkLease
+          : acquireTdccRunLease;
+      await create(db, { id: "run", trigger: "manual" });
+      await acquireSyncJobLock(db, {
+        lockRowId,
+        runId: "run",
+        scope: "all",
+        trigger: "manual",
+        leaseMs: 60_000,
+      });
+      await acquire(db, { runId: "run", owner: "old", leaseMs: 60_000 });
+      const guarded = guardSyncDatabase(
+        db,
+        { lockRowId, runId: "run" },
+        new AbortController().signal,
+        { connectorId, owner: "old" },
+      );
+      await db
+        .prepare(
+          `UPDATE ${connectorId}_sync_runs SET ${connectorId === "einvoice" ? "chunk_lease_expires_at" : "lease_expires_at"} = ?`,
+        )
+        .bind(now)
+        .run();
+      expect(
+        await acquire(db, { runId: "run", owner: "new", leaseMs: 60_000 }),
+      ).toBe(true);
+      await expect(
+        guarded.batch([
+          connectorCursorStatement(guarded, connectorId, "late-cursor", now),
+          guarded
+            .prepare(
+              "UPDATE sync_jobs SET last_status = 'success' WHERE id = ?",
+            )
+            .bind(lockRowId),
+        ]),
+      ).rejects.toBeInstanceOf(SyncLockLostError);
+      expect(
+        await db
+          .prepare("SELECT sync_cursor FROM connector_settings")
+          .first("sync_cursor"),
+      ).toBe("old-cursor");
+      expect(
+        await db
+          .prepare("SELECT locked_by, last_status FROM sync_jobs")
+          .first(),
+      ).toEqual({ locked_by: "run", last_status: null });
+    },
+  );
+
+  it("Cron 補送停滯 run、略過有效租約，逾時結案後可以建立新 run", async () => {
+    const db = harness.binding;
+    const current = Date.now();
+    const stale = new Date(current - 4 * 60_000).toISOString();
+    for (const connectorId of ["einvoice", "tdcc"] as const)
+      await db
+        .prepare(
+          `INSERT INTO sync_jobs (id, connector_id, scope, interval_minutes, next_run_at, created_at, updated_at) VALUES (?, ?, 'all', 1440, ?, ?, ?)`,
+        )
+        .bind(`${connectorId}:all`, connectorId, stale, stale, stale)
+        .run();
+    await createOrGetActiveEinvoiceRun(db, {
+      id: "invoice-run",
+      trigger: "manual",
+      now: stale,
+    });
+    await createOrGetActiveTdccRun(db, {
+      id: "tdcc-run",
+      trigger: "manual",
+      scope: "bank",
+      now: stale,
+    });
+    await acquireTdccRunLease(db, {
+      runId: "tdcc-run",
+      owner: "live",
+      leaseMs: 60_000,
+    });
+    const send = vi.fn().mockResolvedValue(undefined);
+    const env = { DB: db, SYNC_QUEUE: { send } } as unknown as Env;
+    let jobs = await getSyncJobs(db);
+    expect(jobs.find((job) => job.connectorId === "einvoice")).toMatchObject({
+      running: true,
+      runId: "invoice-run",
+      phase: "stalled",
+      retryAfterSeconds: 0,
+    });
+    expect(jobs.find((job) => job.connectorId === "tdcc")).toMatchObject({
+      running: true,
+      runId: "tdcc-run",
+      phase: "queued",
+      lockScope: "bank",
+      lockTrigger: "manual",
+    });
+    await recoverStalledSyncRuns(env);
+    expect(send).toHaveBeenCalledExactlyOnceWith({
+      type: "run-einvoice-chunk",
+      runId: "invoice-run",
+    });
+    await db
+      .prepare(
+        "UPDATE einvoice_sync_runs SET created_at = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(new Date(current - 11 * 60_000).toISOString(), stale, "invoice-run")
+      .run();
+    await recoverStalledSyncRuns(env);
+    jobs = await getSyncJobs(db);
+    expect(jobs.find((job) => job.connectorId === "einvoice")).toMatchObject({
+      running: false,
+      lastStatus: "failed",
+      lockedBy: null,
+    });
+    expect(
+      (
+        await createOrGetActiveEinvoiceRun(db, {
+          id: "retry",
+          trigger: "manual",
+        })
+      ).created,
+    ).toBe(true);
+  });
+
+  it("集保失敗結案、結果與 staging 清理一起提交，失敗時全部回滾", async () => {
+    const db = harness.binding;
+    await db
+      .prepare(
+        `INSERT INTO sync_jobs (id, connector_id, scope, interval_minutes, next_run_at, created_at, updated_at)
+      VALUES ('tdcc:all', 'tdcc', 'all', 1440, ?, ?, ?)`,
+      )
+      .bind(now, now, now)
+      .run();
+    await createOrGetActiveTdccRun(db, { id: "run", trigger: "manual" });
+    await stageSyncWriteRecords(db, "run", [
+      { entityType: "invoice", recordKey: "staged", payload: { id: "staged" } },
+    ]);
+    await db
+      .prepare(
+        `CREATE TRIGGER fail_run_update BEFORE UPDATE ON tdcc_sync_runs
+      BEGIN SELECT RAISE(ABORT, 'synthetic finalization failure'); END`,
+      )
+      .run();
+    const env = { DB: db } as Env;
+    await expect(
+      failTdccSyncRun(env, "run", new Error("failed"), true),
+    ).rejects.toThrow();
+    expect(
+      await db.prepare("SELECT status FROM tdcc_sync_runs").first("status"),
+    ).toBe("queued");
+    expect(
+      await db.prepare("SELECT locked_by, last_status FROM sync_jobs").first(),
+    ).toEqual({ locked_by: "run", last_status: null });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM sync_write_staging")
+        .first("count"),
+    ).toBe(1);
+    await db.prepare("DROP TRIGGER fail_run_update").run();
+    expect(await failTdccSyncRun(env, "run", new Error("failed"), true)).toBe(
+      true,
     );
+    expect(
+      await db.prepare("SELECT status FROM tdcc_sync_runs").first("status"),
+    ).toBe("failed");
+    expect(
+      await db.prepare("SELECT locked_by, last_status FROM sync_jobs").first(),
+    ).toEqual({ locked_by: null, last_status: "failed" });
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM sync_write_staging")
+        .first("count"),
+    ).toBe(0);
   });
 
   for (const run of [
@@ -287,70 +532,6 @@ describe("階段 4：隔離 D1 lease 與 promotion", () => {
       ).toBe(false);
     });
   }
-
-  it("TDCC 更新保留 undefined、明確 null、明文 session 忽略及 CAS", async () => {
-    const db = harness.binding;
-    await createOrGetActiveTdccRun(db, {
-      id: "tdcc",
-      trigger: "manual",
-      encryptedSession: "synthetic-session",
-      now,
-    });
-    expect(
-      await updateTdccRunState(db, {
-        runId: "tdcc",
-        session: { token: "ignored" },
-        now,
-      }),
-    ).toBe(false);
-    expect(
-      await transitionTdccRun(db, {
-        runId: "tdcc",
-        from: "queued",
-        to: "processing",
-        error: "previous",
-        now,
-      }),
-    ).toBe(true);
-    expect(
-      await transitionTdccRun(db, {
-        runId: "tdcc",
-        from: "queued",
-        to: "failed",
-        now,
-      }),
-    ).toBe(false);
-    expect(
-      await transitionTdccRun(db, {
-        runId: "tdcc",
-        to: "processing",
-        error: null,
-        now,
-      }),
-    ).toBe(true);
-    expect(await getTdccRun(db, "tdcc")).toMatchObject({
-      last_error: "previous",
-      encrypted_session: "synthetic-session",
-      session_json: null,
-    });
-    expect(
-      await updateTdccRunState(db, {
-        runId: "tdcc",
-        encryptedSession: null,
-        now,
-      }),
-    ).toBe(true);
-    expect(await getTdccRun(db, "tdcc")).toMatchObject({
-      encrypted_session: null,
-    });
-    expect(
-      await updateTdccRunState(db, {
-        runId: "missing",
-        encryptedSession: null,
-        now,
-      }),
-    ).toBe(false);
-  });
 
   it("Drizzle 更新失敗不洩漏 session 參數或底層 cause", async () => {
     const db = harness.binding;

@@ -1,39 +1,58 @@
-import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/core";
-import type { SyncTrigger } from "@taiwan-fin-hub/db";
+import { connectorCatalog, type ConnectorId } from "@taiwan-fin-hub/shared";
+import type { SyncTrigger } from "../../db";
 import type { Env } from "../../platform/env";
 import {
   prepareSinopacCaptchaSession,
-  prepareHncbCaptchaSession,
-  prepareKgibankCaptchaSession,
-  prepareTaishinCaptchaSession,
-  prepareObankCaptchaSession,
-  prepareFirstbankCaptchaSession,
-  syncCathaybk,
-  syncCtbc,
-  syncSkbank,
-  syncEsun,
   syncSinopac,
-  syncObank,
-  syncFirstbank,
-  syncHncb,
-  syncKgibank,
-  syncTaishin,
-  syncTdcc,
-  SYNC_SCOPE_ALL,
-  TDCC_SCOPE_BANK,
-  TDCC_SCOPE_INVESTMENTS,
-  TDCC_SCOPE_TRADES,
   type SinopacSyncOverrides,
-  type ObankSyncOverrides,
-  type FirstbankSyncOverrides,
-  type SyncOutcome,
-  type SyncScope,
+} from "../../sources/sinopac/sync";
+import {
+  prepareHncbCaptchaSession,
+  syncHncb,
   type HncbSyncOverrides,
+} from "../../sources/hncb/sync";
+import {
+  prepareKgibankCaptchaSession,
+  syncKgibank,
   type KgibankSyncOverrides,
+} from "../../sources/kgibank/sync";
+import {
+  prepareRakutenCaptchaSession,
+  syncRakuten,
+  type RakutenSyncOverrides,
+} from "../../sources/rakuten/sync";
+import {
+  prepareTaishinCaptchaSession,
+  syncTaishin,
   type TaishinSyncOverrides,
-  type TdccSyncOverrides,
+} from "../../sources/taishin/sync";
+import {
+  prepareObankCaptchaSession,
+  syncObank,
+  type ObankSyncOverrides,
+} from "../../sources/obank/sync";
+import {
+  prepareFirstbankCaptchaSession,
+  syncFirstbank,
+  type FirstbankSyncOverrides,
+} from "../../sources/firstbank/sync";
+import {
+  prepareMegabankCaptchaSession,
+  syncMegabank,
+  type MegabankSyncOverrides,
+} from "../../sources/megabank/sync";
+import {
+  syncCathaybk,
   type CathaySyncOverrides,
-} from "./service";
+} from "../../sources/cathaybk/sync";
+import { syncCtbc } from "../../sources/ctbc/sync";
+import { syncSkbank } from "../../sources/skbank/sync";
+import { syncEsun } from "../../sources/esun/sync";
+import {
+  syncNextbank,
+  prepareNextbankCaptchaSession,
+} from "../../sources/nextbank/sync";
+import { SYNC_SCOPE_ALL, type SyncOutcome, type SyncScope } from "./types";
 
 type ConnectorRuntimeDefinition = {
   run: (
@@ -57,13 +76,11 @@ export const connectorRuntimeRegistry: Record<
     },
   },
   tdcc: {
-    run: (env, trigger, scope, overrides) =>
-      syncTdcc(
-        env,
-        trigger,
-        overrides as TdccSyncOverrides,
-        scope === SYNC_SCOPE_ALL ? tdccAllScopes() : [scope],
-      ),
+    run: async () => {
+      throw new Error(
+        "TDCC sync must be started through its durable Queue flow.",
+      );
+    },
   },
   esun: {
     run: (env, trigger) => syncEsun(env, trigger),
@@ -98,15 +115,30 @@ export const connectorRuntimeRegistry: Record<
       syncObank(env, trigger, overrides as ObankSyncOverrides),
     prepareChallenge: prepareObankCaptchaSession,
   },
+  nextbank: {
+    run: (env, trigger, _scope, overrides) =>
+      syncNextbank(env, trigger, overrides),
+    prepareChallenge: prepareNextbankCaptchaSession,
+  },
   firstbank: {
     run: (env, trigger, _scope, overrides) =>
       syncFirstbank(env, trigger, overrides as FirstbankSyncOverrides),
     prepareChallenge: prepareFirstbankCaptchaSession,
   },
+  rakuten: {
+    run: (env, trigger, _scope, overrides) =>
+      syncRakuten(env, trigger, overrides as RakutenSyncOverrides),
+    prepareChallenge: prepareRakutenCaptchaSession,
+  },
   kgibank: {
     run: (env, trigger, _scope, overrides) =>
       syncKgibank(env, trigger, overrides as KgibankSyncOverrides),
     prepareChallenge: prepareKgibankCaptchaSession,
+  },
+  megabank: {
+    run: (env, trigger, _scope, overrides) =>
+      syncMegabank(env, trigger, overrides as MegabankSyncOverrides),
+    prepareChallenge: prepareMegabankCaptchaSession,
   },
 };
 
@@ -138,8 +170,4 @@ export function prepareConnectorChallenge(env: Env, connectorId: ConnectorId) {
     );
   }
   return prepare(env);
-}
-
-function tdccAllScopes(): SyncScope[] {
-  return [TDCC_SCOPE_INVESTMENTS, TDCC_SCOPE_BANK, TDCC_SCOPE_TRADES];
 }

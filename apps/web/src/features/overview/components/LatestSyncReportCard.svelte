@@ -7,7 +7,7 @@
   import {
     connectorCatalog,
     type ScheduledSyncReport,
-  } from "@taiwan-fin-hub/core";
+  } from "@taiwan-fin-hub/shared";
   import { syncReportActivitiesQuery } from "@/data/sync-reports/queries";
   import { formatCurrency, formatDateTime } from "@/shared/format/financial";
   import {

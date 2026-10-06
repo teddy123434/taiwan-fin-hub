@@ -1,1 +1,14 @@
 language: zh-TW
+tone_instructions: "請使用臺灣正體中文；技術名詞、檔名與程式碼可保留英文。留言簡短、具體。"
+reviews:
+  profile: quiet
+  enable_prompt_for_ai_agents: false
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        只對高可信、會造成實際功能錯誤、資料遺失或安全問題的變更留言。
+        說明具體觸發條件與影響；略過風格偏好、可選重構、純猜測，
+        以及已有 CI 檢查的格式問題。同一根因只留一則留言。

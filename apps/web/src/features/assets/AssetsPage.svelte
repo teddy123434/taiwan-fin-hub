@@ -127,7 +127,9 @@
         <p class="mt-3 text-caption text-subtle">
           {summary.hasUnknownCardBalance
             ? "信用卡負債資料不完整"
-            : `已扣除 ${formatCurrency(summary.cardDebt)} 信用卡負債`}
+            : summary.cardDebt < 0
+              ? `已計入 ${formatCurrency(-summary.cardDebt)} 信用卡溢繳餘額`
+              : `已扣除 ${formatCurrency(summary.cardDebt)} 信用卡負債`}
         </p>
       </div>
       <div class="mt-6 grid grid-cols-3 gap-3 md:gap-6">
@@ -243,7 +245,7 @@
                       {group.cards.length
                         ? group.hasUnknownCardBalance
                           ? "負債資料不完整"
-                          : `負債 ${formatCurrency(-group.debtTotalTwd)}`
+                          : `${group.debtTotalTwd < 0 ? "溢繳" : "負債"} ${formatCurrency(-group.debtTotalTwd)}`
                         : "無信用卡"}
                     </small>
                   </span>
@@ -366,7 +368,7 @@
                     {group.cards.length
                       ? group.hasUnknownCardBalance
                         ? "負債資料不完整"
-                        : `負債 ${formatCurrency(-group.debtTotalTwd)}`
+                        : `${group.debtTotalTwd < 0 ? "溢繳" : "負債"} ${formatCurrency(-group.debtTotalTwd)}`
                       : "無信用卡"}
                   </small>
                 </span>

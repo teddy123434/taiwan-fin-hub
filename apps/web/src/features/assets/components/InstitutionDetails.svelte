@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { CreditCardBillRow } from "@/data/bank/types";
+  import type { BankAccountRow, CreditCardBillRow } from "@/data/bank/types";
   import {
     formatBankAccountName,
     formatCurrency,
@@ -35,9 +35,30 @@
     return card?.accountName ?? card?.institutionName ?? "信用卡帳戶";
   }
 
-  function paymentStatusLabel(isPaid?: number) {
-    if (isPaid === 1) return "已繳";
-    if (isPaid === 0) return "待繳";
+  function cardPaymentLabel(card: BankAccountRow) {
+    if (card.balance != null && card.balance > 0) return "溢繳餘額，無需繳款";
+    const latestBill = institutionBills.find(
+      (bill) => bill.accountId === card.id,
+    );
+    if (latestBill?.isPaid === 1) {
+      return latestBill.paymentDueDate
+        ? `最近帳單已繳 · 期限 ${formatDate(latestBill.paymentDueDate)}`
+        : "最近帳單已繳";
+    }
+    const dueDate = card.paymentDueDate ?? latestBill?.paymentDueDate;
+    if (latestBill?.isPaid === 0) {
+      return dueDate ? `帳單待繳 · 期限 ${formatDate(dueDate)}` : "帳單待繳";
+    }
+    if (dueDate) return `繳款期限 ${formatDate(dueDate)}`;
+    return card.balance == null ? "繳款期限待同步" : "繳款期限尚未提供";
+  }
+
+  function paymentStatusLabel(bill: CreditCardBillRow) {
+    if (bill.isPaid === 1)
+      return bill.statementAmount != null && bill.statementAmount <= 0
+        ? "無需繳款"
+        : "已繳";
+    if (bill.isPaid === 0) return "待繳";
     return "狀態未提供";
   }
 </script>
@@ -61,7 +82,9 @@
         </p>
       </div>
       <div>
-        <p class="text-caption text-subtle">信用卡負債</p>
+        <p class="text-caption text-subtle">
+          {group.debtTotalTwd < 0 ? "信用卡溢繳餘額" : "信用卡負債"}
+        </p>
         <p class="mt-2 text-lg font-medium tabular-nums text-coral">
           {group.hasUnknownCardBalance
             ? "資料不完整"
@@ -149,17 +172,13 @@
                 {card.accountName ?? formatBankAccountName(card)}
               </p>
               <p class="mt-1 text-caption text-subtle">
-                {card.paymentDueDate
-                  ? `繳款期限 ${formatDate(card.paymentDueDate)}`
-                  : card.balance == null
-                    ? "繳款期限待同步"
-                    : "繳款期限尚未提供"}
+                {cardPaymentLabel(card)}
               </p>
             </div>
             <p class="text-right text-sm font-medium tabular-nums text-coral">
               {card.balance == null
-                ? "金額尚未取得"
-                : formatCurrency(-Math.abs(card.balance), card.currency)}
+                ? "剩餘應繳金額未取得"
+                : formatCurrency(card.balance, card.currency)}
             </p>
           </div>
         {/each}
@@ -198,7 +217,7 @@
                 <p class="mt-1 text-caption text-subtle">
                   {bill.billingPeriod} · {bill.paymentDueDate
                     ? `期限 ${formatDate(bill.paymentDueDate)}`
-                    : "期限未提供"} · {paymentStatusLabel(bill.isPaid)}
+                    : "期限未提供"} · {paymentStatusLabel(bill)}
                 </p>
               </div>
               <p class="text-sm font-medium tabular-nums">

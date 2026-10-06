@@ -1,0 +1,13 @@
+{
+  "name": "@taiwan-fin-hub/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "build": "node ../node_modules/@typescript/native/bin/tsc -p tsconfig.json",
+    "typecheck": "node ../node_modules/@typescript/native/bin/tsc -p tsconfig.json"
+  }
+}

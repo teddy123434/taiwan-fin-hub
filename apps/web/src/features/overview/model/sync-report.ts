@@ -1,7 +1,7 @@
 import type {
   ScheduledSyncReport,
   SyncFinancialChangeUnavailableReason,
-} from "@taiwan-fin-hub/core";
+} from "@taiwan-fin-hub/shared";
 
 export type SyncReportStatusPresentation = {
   label: string;
