@@ -12,9 +12,15 @@ const UPSTREAM_TRAILER = "Taiwan-Fin-Hub-Upstream";
 class SyncError extends Error {}
 
 function runGit(args, options = {}) {
-  const { allowedExitCodes = [0], environment = {}, output = "text" } = options;
+  const {
+    allowedExitCodes = [0],
+    environment = {},
+    output = "text",
+    input,
+  } = options;
   const result = spawnSync("git", args, {
     cwd: process.cwd(),
+    input,
     encoding: output === "buffer" ? undefined : "utf8",
     env: { ...process.env, ...environment },
     maxBuffer: 64 * 1024 * 1024,
@@ -192,7 +198,40 @@ function parseTreeEntries(commit, pathspec) {
     });
 }
 
-function treeWithWorkflowsFrom(sourceCommit, workflowSourceCommit) {
+// Only the top-level Worker name is deployment identity. All other settings
+// still participate in the normal three-way merge and conflict checks.
+function customizedWorkerConfig(sourceCommit, baseline) {
+  const read = (commit) => {
+    const result = runGit(["show", `${commit}:wrangler.toml`], {
+      allowedExitCodes: [0, 128],
+    });
+    return result.status === 0 ? result.stdout : undefined;
+  };
+  const nameLine = (text) => {
+    if (text === undefined) return undefined;
+    const topLevel = text.split(/^\s*\[/m, 1)[0];
+    const matches = [
+      ...topLevel.matchAll(
+        /^name\s*=\s*("[^"\n]+"|'[^'\n]+')[ \t]*(?:#[^\n]*)?$/gm,
+      ),
+    ];
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const original = nameLine(read(baseline));
+  const installed = nameLine(read("HEAD"));
+  const source = read(sourceCommit);
+  const incoming = nameLine(source);
+  if (!original || !installed || !incoming || original[1] === installed[1]) {
+    return undefined;
+  }
+  return (
+    source.slice(0, incoming.index) +
+    incoming[0].replace(incoming[1], installed[1]) +
+    source.slice(incoming.index + incoming[0].length)
+  );
+}
+
+function treeWithWorkflowsFrom(sourceCommit, workflowSourceCommit, baseline) {
   const temporaryDirectory = mkdtempSync(
     path.join(tmpdir(), "taiwan-fin-hub-sync-index-"),
   );
@@ -221,6 +260,26 @@ function treeWithWorkflowsFrom(sourceCommit, workflowSourceCommit) {
         ],
         { environment },
       );
+    }
+    if (baseline) {
+      const config = customizedWorkerConfig(sourceCommit, baseline);
+      if (config !== undefined) {
+        const object = gitText(["hash-object", "-w", "--stdin"], {
+          input: config,
+        });
+        const entry = parseTreeEntries(sourceCommit, "wrangler.toml")[0];
+        runGit(
+          [
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            entry.mode,
+            object,
+            entry.path,
+          ],
+          { environment },
+        );
+      }
     }
     return gitText(["write-tree"], { environment });
   } finally {
@@ -260,14 +319,13 @@ function buildMergedTree(baseline, upstreamRef) {
     return directMerge.tree;
   }
 
-  // workflow 只能由使用者自行更新。若完整 tree 的衝突只來自 workflows，
-  // 以 HEAD 的 workflow tree 遮罩三方輸入後再檢查一次；其他路徑仍保留
-  // merge-tree 的完整衝突偵測。
+  // workflows 與客製 Worker 名稱由部署版本管理。遮罩這些欄位後
+  // 再檢查三方合併；其他設定與程式碼仍保留完整衝突偵測。
   const maskedBaseline = temporaryCommitForTree(
-    treeWithWorkflowsFrom(baseline, "HEAD"),
+    treeWithWorkflowsFrom(baseline, "HEAD", baseline),
   );
   const maskedUpstream = temporaryCommitForTree(
-    treeWithWorkflowsFrom(upstreamRef, "HEAD"),
+    treeWithWorkflowsFrom(upstreamRef, "HEAD", baseline),
   );
   const codeMerge = mergeTree(maskedBaseline, "HEAD", maskedUpstream);
   if (codeMerge.conflict) {
@@ -276,7 +334,9 @@ function buildMergedTree(baseline, upstreamRef) {
     );
   }
 
-  console.log("偵測到僅限 GitHub Actions workflows 的差異；保留部署版本。");
+  console.log(
+    "保留部署版本的 workflows 與客製 Worker 名稱，其他內容通過三方合併檢查。",
+  );
   return codeMerge.tree;
 }
 

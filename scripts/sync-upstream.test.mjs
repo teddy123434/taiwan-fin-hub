@@ -435,6 +435,64 @@ test("三方合併發生程式碼衝突時不改 working tree 且不 push", () =
   });
 });
 
+for (const conflictingCode of [false, true]) {
+  test(`已核對基準的客製部署保留 Worker 名稱${conflictingCode ? "並拒絕其他設定衝突" : "且接收上游設定更新"}`, () => {
+    withTemporaryRepository((root) => {
+      const upstream = createUpstream(root, { includeSecondCommit: false });
+      const config = (name, date) =>
+        `name = "${name}"\ncompatibility_date = "${date}"\n\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "finance-db"\n`;
+      write(
+        upstream.worktree,
+        "wrangler.toml",
+        config("finance", "2026-06-01"),
+      );
+      const baseline = commitAll(upstream.worktree, "deployment baseline");
+      git(upstream.worktree, "push", "origin", "main");
+      const deployment = createImportedDeployment(root, upstream);
+      write(
+        deployment.worktree,
+        "wrangler.toml",
+        config("finance-teddy", conflictingCode ? "2026-07-01" : "2026-06-01"),
+      );
+      const before = commitAll(
+        deployment.worktree,
+        `核對部署基準\n\nTaiwan-Fin-Hub-Upstream: ${baseline}`,
+      );
+      git(deployment.worktree, "push", "origin", "main");
+      write(
+        upstream.worktree,
+        "wrangler.toml",
+        config("all-set", "2026-08-01"),
+      );
+      const latest = commitAll(
+        upstream.worktree,
+        "upstream rename and settings",
+      );
+      git(upstream.worktree, "push", "origin", "main");
+      const result = runUpdater(deployment.worktree, upstream.bare);
+      if (conflictingCode) {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /發生衝突/);
+        assert.equal(remoteBranch(deployment.worktree, "main"), before);
+        assert.equal(git(deployment.worktree, "status", "--porcelain"), "");
+      } else {
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(
+          git(deployment.worktree, "show", "HEAD:wrangler.toml"),
+          config("finance-teddy", "2026-08-01").trim(),
+        );
+        assert.match(
+          git(deployment.worktree, "show", "-s", "--format=%B", "HEAD"),
+          new RegExp(`Taiwan-Fin-Hub-Upstream: ${latest}`),
+        );
+        const after = git(deployment.worktree, "rev-parse", "HEAD");
+        assert.equal(runUpdater(deployment.worktree, upstream.bare).status, 0);
+        assert.equal(git(deployment.worktree, "rev-parse", "HEAD"), after);
+      }
+    });
+  });
+}
+
 test("先前同步後的非衝突使用者修改會保留，且不引入上游 parent", () => {
   withTemporaryRepository((root) => {
     const upstream = createUpstream(root);

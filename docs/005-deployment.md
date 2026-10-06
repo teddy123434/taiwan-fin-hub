@@ -104,6 +104,10 @@ workflow 會：
 
 首次同步若沒有共同 Git history，更新器只會在部署內容可對應到上游版本、且 workflows 以外沒有自行修改時接軌。同步前會建立 `backup-before-first-upstream-sync` branch；同名 branch 已存在時不會覆寫。
 
+若匯入時已客製 `package.json` 名稱或 `wrangler.toml` 的資源名稱，首次版本的完整比對可能無法通過。需先備份部署 branch，逐一核對初始 tree 與候選上游 commit 的差異；只有確認差異皆為預期的部署設定後，才可建立含 `Taiwan-Fin-Hub-Upstream: <完整上游 SHA>` 的修復 commit 作為接軌基準。不得使用未核對的 SHA 或直接標記最新版本，否則可能跳過必要更新。
+
+若部署的 Worker 名稱與上游基準不同，同步會保留 `wrangler.toml` 的頂層 `name`，讓上游更名不影響既有部署。其他設定仍參與三方合併；發生衝突時停止推送。
+
 後續同步會在 commit message 記錄上游基準，不使用 force push。若本地修改與上游衝突，更新器會在推送前停止，保留目前內容供手動處理。
 
 ### 更新故障排查
