@@ -5,6 +5,7 @@ import {
   connectBrowserWithCancellation,
   prepareBrowserLoginWithRetry,
   closeBrowserSession,
+  type ReportBrowserLoginStage,
 } from "../browser.js";
 import puppeteer, {
   type Browser,
@@ -22,7 +23,10 @@ import {
   type TaishinConfig,
   type TaishinCreditCardPayloads,
 } from "./protocol";
-import { fetchTaishinDeposits } from "./deposit-protocol";
+import {
+  fetchTaishinDeposits,
+  TaishinDepositProtocolError,
+} from "./deposit-protocol";
 
 const RWD_URL = "https://my.taishinbank.com.tw/TIBNetBank/svc/rwd/index.html";
 const API_ROOT = "/TIBNetBank/svc";
@@ -237,20 +241,28 @@ export function createTaishinConnector(
             connectorId: "taishin",
             isRetryable: (error) =>
               error instanceof TaishinCaptchaUnavailableError,
-            prepare: async (browser, observePage, signal, attempt) => {
+            prepare: async (
+              browser,
+              observePage,
+              signal,
+              attempt,
+              reportStage,
+            ) => {
               stage = "initialize_browser_page";
               const pages = await browser.pages();
               const page = pages[0] ?? (await browser.newPage());
               observePage(page);
               stage = "configure_browser_page";
+              reportStage("configure_page");
               await configurePage(page);
               let frame: BrowserPage = page;
               if (attempt === 1 && config.sessionCookies) {
                 stage = "restore_session";
+                reportStage("restore_session");
                 await importCookies(page, config.sessionCookies);
                 await page.goto(RWD_URL, {
                   waitUntil: "domcontentloaded",
-                  timeout: 15_000,
+                  timeout: 30_000,
                 });
                 frame = await findLoginFrame(page);
                 if (await hasValidSession(frame)) {
@@ -264,9 +276,10 @@ export function createTaishinConnector(
                 throw new TaishinVerificationRequiredError(
                   "台新銀行 session 已失效，需要重新登入。",
                 );
-              frame = await openLoginAndFill(page, config);
+              frame = await openLoginAndFill(page, config, reportStage);
               if (await isLoggedIn(frame))
                 return { page, frame, loggedIn: true, capture: undefined };
+              reportStage("captcha");
               const captcha = await captureCaptcha(frame);
               return {
                 page,
@@ -494,7 +507,20 @@ export async function fetchTaishinBankData(
           : "fetch_deposit_transactions",
     );
     return postJson(page, path, body);
-  }, now);
+  }, now).catch((error: unknown) => {
+    if (error instanceof TaishinDepositProtocolError && error.diagnostics) {
+      console.warn(
+        JSON.stringify({
+          event: "taishin_deposit_schema_validation_failed",
+          connectorId: "taishin",
+          endpoint: "getRB08000100Data",
+          issues: error.diagnostics.issues,
+          truncated: error.diagnostics.truncated,
+        }),
+      );
+    }
+    throw error;
+  });
   const payloads = await fetchCreditCardPayloads(page, setStage);
   setStage("parse_payload");
   const credit = parseTaishinCreditCardData(payloads, now);
@@ -859,11 +885,17 @@ function sanitizeBrowserErrorPart(value: string, maxLength: number) {
     .slice(0, maxLength);
 }
 
-async function openLoginAndFill(page: Page, config: TaishinConfig) {
+async function openLoginAndFill(
+  page: Page,
+  config: TaishinConfig,
+  reportStage?: ReportBrowserLoginStage,
+) {
+  reportStage?.("navigate");
   await page.goto(RWD_URL, {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
+  reportStage?.("form");
   const frame = await findLoginFrame(page);
   if (await isLoggedIn(frame)) return frame;
 
