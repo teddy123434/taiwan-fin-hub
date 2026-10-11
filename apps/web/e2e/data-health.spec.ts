@@ -50,7 +50,7 @@ test("離頁儲存保留已完成時間及其他排程變更", async ({ page }) 
   let schedule = {
     intervalMinutes: 1440,
     preferredTime: "07:30",
-    preferredWeekday: 1,
+    preferredWeekdays: [1],
   };
   const updates: (typeof schedule)[] = [];
   let releaseFirstSave = () => {};
@@ -100,10 +100,17 @@ test("離頁儲存保留已完成時間及其他排程變更", async ({ page }) 
       .filter({ visible: true })
       .selectOption("10080");
     await expect.poll(() => updates.length).toBe(1);
-    await page
-      .getByRole("combobox", { name: "執行日", exact: true })
-      .filter({ visible: true })
-      .selectOption("5");
+    await expect(
+      page
+        .getByRole("checkbox", { name: "週一", exact: true })
+        .filter({ visible: true }),
+    ).toBeDisabled();
+    for (const day of ["週三", "週五", "週日"]) {
+      await page
+        .getByRole("checkbox", { name: day, exact: true })
+        .filter({ visible: true })
+        .check();
+    }
     await timePicker.click();
     await page
       .getByRole("combobox", { name: "小時", exact: true })
@@ -120,16 +127,26 @@ test("離頁儲存保留已完成時間及其他排程變更", async ({ page }) 
     await expect
       .poll(() => updates)
       .toEqual([
-        { intervalMinutes: 10080, preferredTime: "07:30", preferredWeekday: 1 },
-        { intervalMinutes: 10080, preferredTime: "07:30", preferredWeekday: 5 },
+        {
+          intervalMinutes: 10080,
+          preferredTime: "07:30",
+          preferredWeekdays: [1],
+        },
+        {
+          intervalMinutes: 10080,
+          preferredTime: "07:30",
+          preferredWeekdays: [0, 1, 3, 5],
+        },
       ]);
     await page.getByRole("button", { name: "同步與通知", exact: true }).click();
     await expect(timePicker).toBeVisible();
-    await expect(
-      page
-        .getByRole("combobox", { name: "執行日", exact: true })
-        .filter({ visible: true }),
-    ).toHaveValue("5");
+    for (const day of ["週一", "週三", "週五", "週日"]) {
+      await expect(
+        page
+          .getByRole("checkbox", { name: day, exact: true })
+          .filter({ visible: true }),
+      ).toBeChecked();
+    }
   } finally {
     releaseFirstSave();
   }

@@ -667,7 +667,7 @@ async function promoteTdccRun(env: Env, run: TdccRunRow) {
       job.preferred_time,
       new Date(now),
       job.next_run_at,
-      job.preferred_weekday,
+      job.preferred_weekdays,
     );
     finalizeStatements.push(
       env.DB.prepare(
@@ -786,7 +786,7 @@ async function finishTdccJob(
           job.preferred_time,
           new Date(now),
           job.next_run_at,
-          job.preferred_weekday,
+          job.preferred_weekdays,
         )
       : job.next_run_at;
   const statements: D1PreparedStatement[] = [

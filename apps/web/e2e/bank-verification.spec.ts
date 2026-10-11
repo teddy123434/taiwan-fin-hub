@@ -146,6 +146,7 @@ for (const source of [
       intervalMinutes: 1440,
       preferredTime: "06:00",
       preferredWeekday: 1,
+      preferredWeekdays: [1],
       lastStatus: null as string | null,
       lastError: null,
       lastRunAt: null as string | null,
@@ -185,6 +186,7 @@ for (const source of [
                     intervalMinutes: 1440,
                     preferredTime: "06:00",
                     preferredWeekday: 1,
+                    preferredWeekdays: [1],
                   }
                 : path === "/api/notifications/config"
                   ? { enabled: false }

@@ -112,7 +112,7 @@ function cloudflare({ deniedPath } = {}) {
 }
 
 function deploymentRunner({ initialSecrets = {}, failDeployment = 0 } = {}) {
-  const runtimeSecrets = { ...initialSecrets };
+  const runtimeSecrets = { CONFIG_ENCRYPTION_KEY: "auto", ...initialSecrets };
   const uploads = [];
   const calls = [];
   const run = async (args) => {
@@ -125,6 +125,14 @@ function deploymentRunner({ initialSecrets = {}, failDeployment = 0 } = {}) {
         stdout: JSON.stringify(
           Object.keys(runtimeSecrets).map((name) => ({ name })),
         ),
+        stderr: "",
+      };
+    if (args[0] === "d1")
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify([
+          { success: true, results: [{ has_encrypted_data: 0 }] },
+        ]),
         stderr: "",
       };
     assert.equal(args[0], "deploy");
@@ -214,4 +222,24 @@ test("dry-run performs no Access queries, Queue provisioning, or secret writes",
     0,
   );
   assert.deepEqual(calls, [["deploy", "--dry-run"]]);
+});
+
+test("Access setup and later deployments preserve the generated encryption key and VAPID pair", async () => {
+  const api = cloudflare();
+  const runner = deploymentRunner();
+  assert.equal(await deploy([], options(api, runner)), 0);
+  assert.equal(runner.uploads.length, 2);
+  const encryptionKey = runner.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY;
+  assert.match(encryptionKey, /^[0-9a-f]{64}$/);
+  const initialSecrets = { ...runner.runtimeSecrets };
+  assert.deepEqual(runner.uploads[1].secrets, accessSecrets);
+  assert.equal(await deploy([], options(api, runner)), 0);
+  assert.deepEqual(runner.runtimeSecrets, initialSecrets);
+  assert.deepEqual(runner.uploads[2].secrets, {});
+  assert.equal(runner.calls.filter((args) => args[0] === "d1").length, 1);
+  for (const upload of runner.uploads) {
+    if (upload.file)
+      await assert.rejects(readFile(upload.file), { code: "ENOENT" });
+    assert.equal(upload.args.includes(encryptionKey), false);
+  }
 });

@@ -26,7 +26,7 @@ export async function setDefaultSyncSchedule(
   input: {
     intervalMinutes: number;
     preferredTime: string;
-    preferredWeekday: number;
+    preferredWeekdays: number[];
   },
 ) {
   const now = new Date();
@@ -41,12 +41,13 @@ export async function setDefaultSyncSchedule(
         input.preferredTime,
         now,
         job.nextRunAt,
-        input.preferredWeekday,
+        input.preferredWeekdays,
       ),
     })),
   });
   return {
     ...input,
+    preferredWeekday: input.preferredWeekdays[0],
     timezone: "Asia/Taipei" as const,
     updatedAt: now.toISOString(),
   };
@@ -96,6 +97,7 @@ export type UpdateSyncJobInput = {
   intervalMinutes?: number;
   preferredTime?: string;
   preferredWeekday?: number;
+  preferredWeekdays?: number[];
   scheduleMode?: SyncScheduleMode;
 };
 
@@ -117,15 +119,18 @@ export async function editSyncJob(
     job.interval_minutes;
   const preferredTime =
     defaultSchedule?.preferredTime ?? input.preferredTime ?? job.preferred_time;
-  const preferredWeekday =
-    defaultSchedule?.preferredWeekday ??
-    input.preferredWeekday ??
-    job.preferred_weekday;
+  const preferredWeekdays =
+    defaultSchedule?.preferredWeekdays ??
+    input.preferredWeekdays ??
+    (input.preferredWeekday !== undefined
+      ? [input.preferredWeekday]
+      : job.preferred_weekdays);
   const scheduleChanged =
     input.scheduleMode !== undefined ||
     input.intervalMinutes !== undefined ||
     input.preferredTime !== undefined ||
-    input.preferredWeekday !== undefined;
+    input.preferredWeekday !== undefined ||
+    input.preferredWeekdays !== undefined;
   const nextRunAt =
     input.nextRunAt ??
     (scheduleChanged || input.enabled === true
@@ -134,7 +139,7 @@ export async function editSyncJob(
           preferredTime,
           now,
           job.next_run_at,
-          preferredWeekday,
+          preferredWeekdays,
         )
       : job.next_run_at);
   if (
@@ -144,7 +149,7 @@ export async function editSyncJob(
       intervalMinutes,
       scheduleMode,
       preferredTime,
-      preferredWeekday,
+      preferredWeekdays,
       updatedAt: now.toISOString(),
     }))
   )
@@ -156,7 +161,8 @@ export async function editSyncJob(
     enabled: input.enabled ?? Boolean(job.enabled),
     intervalMinutes,
     preferredTime,
-    preferredWeekday,
+    preferredWeekday: preferredWeekdays[0],
+    preferredWeekdays,
     scheduleMode,
     nextRunAt,
   };

@@ -1,4 +1,4 @@
-import { createECDH, randomUUID } from "node:crypto";
+import { createECDH, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -457,41 +457,33 @@ function generateVapidSecrets() {
   };
 }
 
-async function createInitialSecretsFile(temporaryDirectory, suppliedSecrets) {
-  if (!suppliedSecrets) {
-    const vapidKeys = generateVapidSecrets();
-    const secretsFile = join(temporaryDirectory, "secrets.json");
-    await writeFile(secretsFile, `${JSON.stringify(vapidKeys)}\n`, {
+async function createInitialSecretsFile(
+  temporaryDirectory,
+  suppliedSecrets,
+  initialSecrets,
+) {
+  const { content, parsedJson } = suppliedSecrets ?? {};
+  const secretsFile = join(
+    temporaryDirectory,
+    !suppliedSecrets || parsedJson ? "secrets.json" : "secrets.env",
+  );
+
+  if (!suppliedSecrets || parsedJson) {
+    await writeFile(
+      secretsFile,
+      `${JSON.stringify({ ...parsedJson, ...initialSecrets })}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } else {
+    const initialLines = Object.entries(initialSecrets)
+      .map(([name, value]) => `${name}=${value}\n`)
+      .join("");
+    await writeFile(secretsFile, `${content.trimEnd()}\n${initialLines}`, {
       encoding: "utf8",
       mode: 0o600,
     });
-    return { secretsFile, generated: true };
   }
-
-  const { content, parsedJson, vapidKeys: existingVapidKeys } = suppliedSecrets;
-  const vapidKeys = existingVapidKeys ?? generateVapidSecrets();
-  const secretsFile = join(
-    temporaryDirectory,
-    parsedJson ? "secrets.json" : "secrets.env",
-  );
-
-  if (parsedJson) {
-    await writeFile(
-      secretsFile,
-      `${JSON.stringify({ ...parsedJson, ...vapidKeys })}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
-    return { secretsFile, generated: existingVapidKeys === null };
-  }
-
-  const vapidLines = existingVapidKeys
-    ? ""
-    : `VAPID_PUBLIC_KEY=${vapidKeys.VAPID_PUBLIC_KEY}\nVAPID_PRIVATE_KEY=${vapidKeys.VAPID_PRIVATE_KEY}\n`;
-  await writeFile(secretsFile, `${content.trimEnd()}\n${vapidLines}`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  return { secretsFile, generated: existingVapidKeys === null };
+  return secretsFile;
 }
 
 async function readSuppliedSecretsFile(sourceFile, effectiveDirectory) {
@@ -529,6 +521,75 @@ export async function readDeploymentConfig(argumentsToDeploy) {
   return { ...config, name: valueOf(["--name"]) ?? config.name };
 }
 
+async function needsGeneratedConfigEncryptionKey(
+  argumentsToDeploy,
+  { run, config, existingSecrets, suppliedSecrets },
+) {
+  if (
+    existingSecrets?.has("GENERATED_CONFIG_ENCRYPTION_KEY") ||
+    suppliedSecrets?.GENERATED_CONFIG_ENCRYPTION_KEY
+  ) {
+    return false;
+  }
+  const configuredKey =
+    suppliedSecrets?.CONFIG_ENCRYPTION_KEY ??
+    config.vars?.CONFIG_ENCRYPTION_KEY;
+  if (configuredKey && configuredKey !== "auto") return false;
+
+  // Inspect only existence, never encrypted records or credentials. A lost
+  // key must not be replaced with a new one once encrypted data exists.
+  const result = await run(
+    [
+      "d1",
+      "execute",
+      "DB",
+      "--remote",
+      "--json",
+      "--command",
+      `SELECT
+        EXISTS(SELECT 1 FROM connector_settings) OR
+        EXISTS(SELECT 1 FROM push_subscriptions) OR
+        EXISTS(SELECT 1 FROM tdcc_sync_runs
+          WHERE encrypted_config IS NOT NULL OR encrypted_session IS NOT NULL)
+        AS has_encrypted_data`,
+      ...queueContextArguments(argumentsToDeploy),
+    ],
+    { captureOutput: true },
+  );
+  let hasEncryptedData;
+  if (result.exitCode === 0) {
+    try {
+      const response = JSON.parse(result.stdout);
+      if (response.length === 1 && response[0].success === true) {
+        hasEncryptedData = response[0].results?.[0]?.has_encrypted_data;
+      }
+    } catch {
+      // Fail closed without including a possibly sensitive CLI response.
+    }
+  }
+  if (hasEncryptedData !== 0 && hasEncryptedData !== 1) {
+    throw new Error(
+      "Unable to inspect encrypted D1 data. Refusing to initialize GENERATED_CONFIG_ENCRYPTION_KEY; check the DB binding and apply migrations before deploying.",
+    );
+  }
+  if (hasEncryptedData === 0) return true;
+
+  if (
+    configuredKey === "auto" ||
+    !existingSecrets?.has("CONFIG_ENCRYPTION_KEY")
+  ) {
+    throw new Error(
+      "D1 already contains encrypted data, but GENERATED_CONFIG_ENCRYPTION_KEY is missing. Refusing to generate a replacement; restore the original encryption key before using auto.",
+    );
+  }
+  // Cloudflare exposes secret names, not values. An older installation with
+  // a manual key can update normally; auto with a lost key fails at runtime.
+  console.warn(
+    "[deploy] D1 contains encrypted data; keeping the existing CONFIG_ENCRYPTION_KEY without generating a new key. If it is auto, restore the original GENERATED_CONFIG_ENCRYPTION_KEY.",
+  );
+  return false;
+}
+
 async function deployPrepared(
   argumentsToDeploy,
   { run, environment, readConfig, fetchApi, fetchPublic },
@@ -556,6 +617,17 @@ async function deployPrepared(
     );
   }
 
+  const config = await readConfig(argumentsToDeploy);
+  const needsEncryptionKey = await needsGeneratedConfigEncryptionKey(
+    argumentsToDeploy,
+    {
+      run,
+      config,
+      existingSecrets: secrets,
+      suppliedSecrets: suppliedSecrets?.values,
+    },
+  );
+
   let accessSetup = null;
   if (
     environment.WORKERS_CI === "1" &&
@@ -563,7 +635,7 @@ async function deployPrepared(
   ) {
     accessSetup = await prepareAccessSetup({
       environment,
-      config: await readConfig(argumentsToDeploy),
+      config,
       existingSecrets: secrets,
       suppliedSecrets: suppliedSecrets?.values,
       fetchApi,
@@ -572,22 +644,38 @@ async function deployPrepared(
   }
 
   const temporaryDirectory =
-    needsInitialKeys || accessSetup
+    needsInitialKeys || needsEncryptionKey || accessSetup
       ? await mkdtemp(join(tmpdir(), "taiwan-fin-hub-deploy-"))
       : null;
 
   try {
     let argumentsForUpload = argumentsToDeploy;
-    if (needsInitialKeys) {
-      const { secretsFile, generated } = await createInitialSecretsFile(
+    if (needsInitialKeys || needsEncryptionKey) {
+      const initialSecrets = {
+        ...(needsInitialKeys && !suppliedSecrets?.vapidKeys
+          ? generateVapidSecrets()
+          : {}),
+        ...(needsEncryptionKey
+          ? { GENERATED_CONFIG_ENCRYPTION_KEY: randomBytes(32).toString("hex") }
+          : {}),
+      };
+      const secretsFile = await createInitialSecretsFile(
         temporaryDirectory,
         suppliedSecrets,
+        initialSecrets,
       );
-      console.log(
-        generated
-          ? "[deploy] No VAPID key pair found; generating one for this Worker."
-          : "[deploy] Using the VAPID key pair from the supplied secrets file.",
-      );
+      if (needsInitialKeys) {
+        console.log(
+          suppliedSecrets?.vapidKeys
+            ? "[deploy] Using the VAPID key pair from the supplied secrets file."
+            : "[deploy] No VAPID key pair found; generating one for this Worker.",
+        );
+      }
+      if (needsEncryptionKey) {
+        console.log(
+          "[deploy] Initializing GENERATED_CONFIG_ENCRYPTION_KEY for this Worker; future deployments will preserve it.",
+        );
+      }
       argumentsForUpload = [
         ...deployArgumentsWithoutSecretsFile,
         "--secrets-file",
@@ -606,7 +694,7 @@ async function deployPrepared(
         mode: 0o600,
       });
       // Upload a deployed version with the derived values. Wrangler preserves
-      // secrets not included here, including CONFIG_ENCRYPTION_KEY and VAPID.
+      // secrets not included here, including both encryption keys and VAPID.
       const configured = await run([
         "deploy",
         ...deployArgumentsWithoutSecretsFile,

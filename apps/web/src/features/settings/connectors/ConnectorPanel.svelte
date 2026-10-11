@@ -21,6 +21,8 @@
   import Input from "@/shared/ui/Input.svelte";
   import Select from "@/shared/ui/Select.svelte";
   import TimePicker from "@/shared/ui/TimePicker.svelte";
+  import WeekdayPicker from "../components/WeekdayPicker.svelte";
+  import { formatScheduleWeekdays } from "../model/schedule";
   import type { ApiClient } from "@/shared/api/client";
   import { ApiRequestError } from "@/shared/api/client";
   import { isRequestInterrupted } from "@/shared/api/interrupted";
@@ -176,15 +178,6 @@
     { label: "每 12 小時", minutes: 720 },
     { label: "每天", minutes: 1440 },
     { label: "每週", minutes: 10080 },
-  ];
-  const weekdayOptions = [
-    "週日",
-    "週一",
-    "週二",
-    "週三",
-    "週四",
-    "週五",
-    "週六",
   ];
 
   onMount(() =>
@@ -1402,8 +1395,9 @@
             <span class="font-semibold">跟隨預設：</span>
             {#if $defaultSchedule.data}
               {#if $defaultSchedule.data.intervalMinutes === 10080}
-                每{weekdayOptions[$defaultSchedule.data.preferredWeekday] ??
-                  "週一"}
+                {formatScheduleWeekdays(
+                  $defaultSchedule.data.preferredWeekdays,
+                )}
                 {$defaultSchedule.data.preferredTime} 起
               {:else}
                 {intervalLabel(
@@ -1434,23 +1428,13 @@
             </Select>
           </label>
           {#if job.intervalMinutes === 10080}
-            <label class="grid gap-1 text-sm font-semibold text-ink/70">
-              執行日
-              <Select
-                value={job.preferredWeekday}
-                disabled={demoMode || $updateJob.isPending}
-                onchange={(event: Event) =>
-                  $updateJob.mutate({
-                    preferredWeekday: Number(
-                      (event.currentTarget as HTMLSelectElement).value,
-                    ),
-                  })}
-              >
-                {#each weekdayOptions as weekday, index (weekday)}
-                  <option value={index}>{weekday}</option>
-                {/each}
-              </Select>
-            </label>
+            <WeekdayPicker
+              class="md:col-span-4"
+              value={job.preferredWeekdays}
+              disabled={demoMode || $updateJob.isPending}
+              onchange={(preferredWeekdays) =>
+                $updateJob.mutate({ preferredWeekdays })}
+            />
           {/if}
           {#if job.intervalMinutes >= 1440}
             <label class="grid gap-1 text-sm font-semibold text-ink/70">

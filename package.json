@@ -27,7 +27,7 @@
   "cloudflare": {
     "bindings": {
       "CONFIG_ENCRYPTION_KEY": {
-        "description": "用於加密儲存在 D1 的連接器憑證。**請務必修改預設值**，可使用 `openssl rand -hex 32` 產生隨機字串；部署後若更換此金鑰，現有連接器設定將無法解密。"
+        "description": "保留預設值即可，部署時會自動產生加密金鑰。若有開發或除錯需求，可用 `openssl rand -hex 32` 自行產生金鑰，於首次部署時填入。"
       },
       "TEAM_DOMAIN": {
         "description": "Cloudflare GUI 部署流程會自動取得並設定。手動設定時填入 `https://yourteam.cloudflareaccess.com`，不包含 `/cdn-cgi/access/certs`。"

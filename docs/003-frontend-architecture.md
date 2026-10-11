@@ -50,10 +50,10 @@ apps/web/src/
 
 ## 關於與組建資訊
 
-`features/settings/components/AboutPanel.svelte` 透過 `#/about` 顯示上游版本的 Commit、分支與 UTC 組建時間，
+`features/settings/components/AboutPanel.svelte` 透過 `#/about` 顯示上游版本的 Commit、分支與台灣時間（`Asia/Taipei`，UTC+8）的組建時間，
 並提供複製診斷資訊。桌面「設定 → 關於」與手機「更多 → 關於」皆提供入口，沿用設定頁的 lazy loading。
 Vite 在組建時注入 `__BUILD_INFO__`，型別宣告位於 `src/vite-env.d.ts`；頁面不另查版本 API。
-Commit 顯示前七碼，複製內容包含來源專案與完整上游 SHA；剪貼簿寫入失敗時顯示唯讀文字框，供手動選取完整診斷資訊。
+Commit 顯示前七碼，複製內容包含來源專案、完整上游 SHA 與相同的台灣組建時間；剪貼簿寫入失敗時顯示唯讀文字框，供手動選取完整診斷資訊。
 資訊來源與本機開發時間的定義見部署文件。
 
 ## 驗證
@@ -112,6 +112,10 @@ npm run verify:web
 同步報告不顯示快照的匯率提示；目前資產的缺少匯率提示由總覽與資產清冊提供。
 
 ## 同步狀態與重試
+
+預設排程與來源自訂排程的每週執行日共用 `WeekdayPicker`，可複選並至少保留一天，
+所有勾選星期共用同一個開始時間（Asia/Taipei）。前端使用 API 已正規化的
+`preferredWeekdays` 陣列；排程摘要以週一至週日的順序顯示所有勾選日。
 
 預設同步排程在變更後自動儲存，連續修改會合併送出；時間選擇器關閉後才儲存完整時間。
 儲存期間保留新的修改並依序送出，離開頁面時送出尚未儲存的變更；若時間選擇器仍開啟，

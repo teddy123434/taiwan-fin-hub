@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import puppeteer, { type Browser, type Page } from "@cloudflare/puppeteer";
+import puppeteer, {
+  type Browser,
+  type Page,
+  type HTTPRequest,
+  type HTTPResponse,
+} from "@cloudflare/puppeteer";
 import {
   createTaishinConnector,
   fetchTaishinBankData,
@@ -51,7 +56,7 @@ describe("台新登入前復原", () => {
           })
           .mockResolvedValueOnce(false)
           .mockResolvedValueOnce({ selector: "captcha-image", digitCount: 6 }),
-        waitForFunction: vi.fn().mockResolvedValue(undefined),
+        waitForFunction: vi.fn().mockResolvedValue({ dispose: vi.fn() }),
         $: vi.fn().mockResolvedValue(image),
         type: vi.fn(),
       };
@@ -69,6 +74,7 @@ describe("台新登入前復原", () => {
       .mockResolvedValue(new Response(null, { status: 200 }));
     const recognizeCaptcha = vi.fn();
     try {
+      vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "warn").mockImplementation(() => {});
       vi.spyOn(puppeteer, "limits").mockResolvedValue({
         allowedBrowserAcquisitions: 1,
@@ -111,17 +117,17 @@ describe("台新登入前復原", () => {
 describe("台新驗證碼換圖與登入保護", () => {
   it.each([
     {
-      name: "重複圖片重新載入後仍相同就停止",
+      name: "重複圖片再次官方換圖後仍相同就停止",
       images: [1, 1, 1],
       ocrAttempts: 1,
-      message: "台新驗證碼換圖失敗，重新載入後仍取得相同圖片，請稍後再試。",
+      message: "台新驗證碼換圖失敗，使用官方換圖後仍取得相同圖片，請稍後再試。",
       outcome: "captcha_unchanged",
     },
     {
       name: "較早辨識過的圖片重新出現時也停止",
       images: [1, 2, 1, 1],
       ocrAttempts: 2,
-      message: "台新驗證碼換圖失敗，重新載入後仍取得相同圖片，請稍後再試。",
+      message: "台新驗證碼換圖失敗，使用官方換圖後仍取得相同圖片，請稍後再試。",
       outcome: "captcha_unchanged",
     },
     {
@@ -133,50 +139,7 @@ describe("台新驗證碼換圖與登入保護", () => {
       outcome: "ocr_invalid",
     },
   ])("$name；不重複辨識或送出登入", async (testCase) => {
-    const screenshot = vi.fn();
-    for (const value of testCase.images)
-      screenshot.mockResolvedValueOnce(new Uint8Array([0xff, 0xd8, value]));
-    const image = { screenshot, dispose: vi.fn().mockResolvedValue(undefined) };
-    const page = {
-      goto: vi.fn().mockResolvedValue(undefined),
-      setViewport: vi.fn().mockResolvedValue(undefined),
-      setUserAgent: vi.fn().mockResolvedValue(undefined),
-      on: vi.fn(),
-      off: vi.fn(),
-      url: () => "https://my.taishinbank.com.tw/TIBNetBank/svc/rwd/index.html",
-      evaluate: vi.fn(
-        async (
-          _callback: unknown,
-          input?: { selector?: string; userId?: string },
-        ) => {
-          if (input?.selector)
-            return {
-              selector: input.selector,
-              digitCount: 6,
-              width: 120,
-              height: 36,
-            };
-          if (input?.userId)
-            return {
-              userId: "user-id",
-              account: "account",
-              password: "password",
-              captcha: "captcha",
-            };
-          return false;
-        },
-      ),
-      waitForFunction: vi.fn().mockResolvedValue(undefined),
-      $: vi.fn().mockResolvedValue(image),
-      type: vi.fn(),
-    };
-    const browser = {
-      pages: vi.fn().mockResolvedValue([page]),
-      sessionId: () => "synthetic-captcha-session",
-      once: vi.fn(),
-      close: vi.fn().mockResolvedValue(undefined),
-      disconnect: vi.fn().mockResolvedValue(undefined),
-    };
+    const { page, browser } = captchaSession(testCase.images);
     const fetch = vi
       .fn()
       .mockResolvedValue(new Response(null, { status: 200 }));
@@ -210,8 +173,11 @@ describe("台新驗證碼換圖與登入保護", () => {
       expect(new Set(recognizedImages).size).toBe(testCase.ocrAttempts);
       expect(page.type).not.toHaveBeenCalled();
       expect(browser.close).toHaveBeenCalledOnce();
-      const attempts = log.mock.calls.map(([value]) =>
+      const records = log.mock.calls.map(([value]) =>
         JSON.parse(String(value)),
+      );
+      const attempts = records.filter(
+        (value) => value.event === "taishin_auto_login_attempt",
       );
       expect(attempts[0]).toMatchObject({
         imageChanged: null,
@@ -225,17 +191,299 @@ describe("台新驗證碼換圖與登入保護", () => {
         outcome: testCase.outcome,
         imageChanged: testCase.outcome !== "captcha_unchanged",
       });
-      expect(attempts.some((attempt) => attempt.captchaRefreshes === 1)).toBe(
+      expect(attempts.some((attempt) => attempt.captchaRefreshes > 0)).toBe(
         true,
       );
-      expect(JSON.stringify(attempts)).not.toMatch(
-        /synthetic-|imageHash|captchaImage/,
+      expect(page.goto).toHaveBeenCalledOnce();
+      expect(JSON.stringify(records)).not.toMatch(
+        /synthetic-|imageHash|captchaImage|[?&]TOKEN=|ECTOKEN/,
       );
     } finally {
       vi.restoreAllMocks();
     }
   });
+
+  it.each([
+    "token_rejected",
+    "wrong_image_token",
+    "image_http_error",
+    "image_changed",
+  ] as const)(
+    "換圖失敗（%s）時不再辨識或送出登入，並釋放 session",
+    async (refreshFailure) => {
+      const { page, browser } = captchaSession([1, 2], { refreshFailure });
+      const recognizeCaptcha = vi.fn().mockResolvedValue(null);
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      try {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        mockCaptchaBrowser(browser);
+        await expect(
+          createTaishinConnector(
+            { fetch } as unknown as Fetcher,
+            recognizeCaptcha,
+          ).sync({
+            userId: "synthetic-id",
+            account: "synthetic-user",
+            password: "synthetic-password",
+          }),
+        ).rejects.toMatchObject({ name: "TaishinCaptchaUnavailableError" });
+        expect(recognizeCaptcha).toHaveBeenCalledOnce();
+        expect(page.type).not.toHaveBeenCalled();
+        expect(page.goto).toHaveBeenCalledOnce();
+        expect(browser.close).toHaveBeenCalledOnce();
+        const records = log.mock.calls.map(([value]) =>
+          JSON.parse(String(value)),
+        );
+        expect(
+          records.find((value) => value.event === "taishin_captcha_refresh"),
+        ).toMatchObject({
+          tokenHttpStatus: 200,
+          tokenResult: refreshFailure === "token_rejected" ? "ERROR" : "NORMAL",
+        });
+        expect(JSON.stringify(records)).not.toMatch(
+          /synthetic-|[?&]TOKEN=|ECTOKEN/,
+        );
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it.each([
+    {
+      detail: "圖形驗證碼錯誤",
+      loginRequests: 3,
+      error: "TaishinVerificationRequiredError",
+    },
+    {
+      detail: "使用者密碼錯誤",
+      loginRequests: 1,
+      error: "TaishinCredentialRejectedError",
+    },
+    {
+      detail: "請輸入身分證字號",
+      loginRequests: 1,
+      error: "TaishinLoginOutcomeUnknownError",
+    },
+  ])(
+    "銀行回覆「$detail」後遵守登入請求上限與停止政策",
+    async ({ detail, loginRequests, error }) => {
+      const { page, browser } = captchaSession([1, 2, 3], {
+        loginDetail: detail,
+      });
+      const recognizeCaptcha = vi.fn().mockResolvedValue("123456");
+      const fetch = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      try {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+        mockCaptchaBrowser(browser);
+        await expect(
+          createTaishinConnector(
+            { fetch } as unknown as Fetcher,
+            recognizeCaptcha,
+          ).sync({
+            userId: "synthetic-id",
+            account: "synthetic-user",
+            password: "synthetic-password",
+          }),
+        ).rejects.toMatchObject({ name: error });
+        expect(recognizeCaptcha).toHaveBeenCalledTimes(loginRequests);
+        expect(page.type).toHaveBeenCalledTimes(loginRequests);
+        expect(page.goto).toHaveBeenCalledOnce();
+        expect(browser.close).toHaveBeenCalledOnce();
+        const attempts = log.mock.calls
+          .map(([value]) => JSON.parse(String(value)))
+          .filter((value) => value.event === "taishin_auto_login_attempt");
+        expect(attempts.at(-1)).toMatchObject({
+          totalLoginRequests: loginRequests,
+        });
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
 });
+
+function mockCaptchaBrowser(
+  browser: ReturnType<typeof captchaSession>["browser"],
+) {
+  vi.spyOn(puppeteer, "limits").mockResolvedValue({
+    allowedBrowserAcquisitions: 1,
+    timeUntilNextAllowedBrowserAcquisition: 0,
+    activeSessions: [],
+    maxConcurrentSessions: 2,
+  });
+  vi.spyOn(puppeteer, "launch").mockResolvedValue(
+    browser as unknown as Browser,
+  );
+}
+
+function captchaSession(
+  images: number[],
+  options: {
+    refreshFailure?:
+      | "token_rejected"
+      | "wrong_image_token"
+      | "image_http_error"
+      | "image_changed";
+    loginDetail?: string;
+  } = {},
+) {
+  const origin = "https://my.taishinbank.com.tw";
+  const tokenUrl = `${origin}/TIBNetBank/svc/web/login/getToken`;
+  const imageUrl = `${origin}/TIBNetBank/svc/web/shuffle/NonSessionShuffle`;
+  let source = `${imageUrl}?TOKEN=synthetic-token-0&ts=0`;
+  let refreshes = 0;
+  let tokenRequest: HTTPRequest;
+  let submitPending = false;
+  let loginSubmitted = false;
+  const requestListeners = new Set<(request: HTTPRequest) => void>();
+  const screenshot = vi.fn();
+  for (const value of images)
+    screenshot.mockResolvedValueOnce(new Uint8Array([0xff, 0xd8, value]));
+  const image = {
+    screenshot,
+    evaluate: vi.fn(
+      async () =>
+        options.refreshFailure !== "image_changed" ||
+        screenshot.mock.calls.length === 1,
+    ),
+    dispose: vi.fn(),
+  };
+  const request = (url: string) =>
+    ({
+      url: () => url,
+      method: () => "POST",
+      frame: () => page,
+    }) as unknown as HTTPRequest;
+  const response = (
+    url: string,
+    request: HTTPRequest,
+    status = 200,
+    payload?: unknown,
+  ) =>
+    ({
+      url: () => url,
+      request: () => request,
+      status: () => status,
+      ok: () => status === 200,
+      json: async () => payload,
+    }) as unknown as HTTPResponse;
+  const page = {
+    goto: vi.fn().mockResolvedValue(undefined),
+    setViewport: vi.fn().mockResolvedValue(undefined),
+    setUserAgent: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn((event: string, listener: (request: HTTPRequest) => void) => {
+      if (event === "request") requestListeners.add(listener);
+    }),
+    off: vi.fn((event: string, listener: (request: HTTPRequest) => void) => {
+      if (event === "request") requestListeners.delete(listener);
+    }),
+    mainFrame: (): Page => page as unknown as Page,
+    url: () => `${origin}/TIBNetBank/svc/rwd/index.html`,
+    evaluate: vi.fn(
+      async (
+        _callback: unknown,
+        input?:
+          | string
+          | {
+              selector?: string;
+              expectedSource?: string;
+              userId?: string;
+            },
+      ) => {
+        if (typeof input === "string") return source;
+        if (input?.selector) {
+          if (!("expectedSource" in input)) return undefined;
+          return {
+            selector: input.selector,
+            source,
+            digitCount: 6,
+            width: 120,
+            height: 36,
+          };
+        }
+        if (input?.userId)
+          return {
+            userId: "user-id",
+            account: "account",
+            password: "password",
+            captcha: "captcha",
+          };
+        if (submitPending) {
+          submitPending = false;
+          loginSubmitted = true;
+          for (const listener of requestListeners)
+            listener(request(`${origin}/TIBNetBank/svc/web/login/login`));
+          return true;
+        }
+        return loginSubmitted ? options.loginDetail : false;
+      },
+    ),
+    waitForFunction: vi.fn().mockResolvedValue({ dispose: vi.fn() }),
+    waitForRequest: vi.fn(
+      async (predicate: (value: HTTPRequest) => boolean) => {
+        refreshes++;
+        tokenRequest = request(tokenUrl);
+        if (!predicate(tokenRequest))
+          throw new Error("No token request matched");
+        return tokenRequest;
+      },
+    ),
+    waitForResponse: vi.fn(
+      async (predicate: (value: HTTPResponse) => Promise<boolean>) => {
+        const token = `synthetic-token-${refreshes}`;
+        const freshSource = `${imageUrl}?TOKEN=${token}&ts=${refreshes}`;
+        // A late response from an earlier request and an unrelated image must
+        // never allow another OCR/login attempt.
+        const candidates = [
+          response(tokenUrl, request(tokenUrl), 200, {
+            RESULT: "NORMAL",
+            ECTOKEN: "synthetic-stale-token",
+          }),
+          response(tokenUrl, tokenRequest, 200, {
+            RESULT:
+              options.refreshFailure === "token_rejected" ? "ERROR" : "NORMAL",
+            ECTOKEN: token,
+          }),
+          response(
+            `${imageUrl}?TOKEN=synthetic-other-token`,
+            request(imageUrl),
+          ),
+        ];
+        if (options.refreshFailure !== "wrong_image_token")
+          candidates.push(
+            response(
+              freshSource,
+              request(freshSource),
+              options.refreshFailure === "image_http_error" ? 503 : 200,
+            ),
+          );
+        for (const candidate of candidates)
+          if (await predicate(candidate)) {
+            if (candidate.url() === freshSource) source = freshSource;
+            return candidate;
+          }
+        throw new Error("No response matched before timeout");
+      },
+    ),
+    $: vi.fn().mockResolvedValue(image),
+    type: vi.fn(async () => {
+      submitPending = true;
+    }),
+  };
+  const browser = {
+    pages: vi.fn().mockResolvedValue([page]),
+    sessionId: () => "synthetic-captcha-session",
+    once: vi.fn(),
+    close: vi.fn().mockResolvedValue(undefined),
+    disconnect: vi.fn().mockResolvedValue(undefined),
+  };
+  return { page, browser };
+}
 
 function responsePage(override: (request: Request) => unknown) {
   const evaluate = vi.fn(async (_callback: unknown, input: Request) => {

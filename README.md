@@ -67,19 +67,7 @@
 
 首次使用時，依畫面透過 **Git account → New Github Connection → Install & Authorize** 授權 Cloudflare 存取 GitHub。
 
-Worker Secret 只需填入 **`CONFIG_ENCRYPTION_KEY`**。
-
-`CONFIG_ENCRYPTION_KEY` 是系統加密連接器設定時必須使用的金鑰，可用下列指令產生：
-
-```bash
-openssl rand -hex 32
-```
-
-金鑰只需填入一次，Cloudflare 會保存供後續更新使用。建議另外存入密碼管理器，重建或搬移時使用相同金鑰；不要在既有部署中更換或刪除，以免無法解密連接器設定。
-
-<img src="images/deploy-setup.png" alt="Cloudflare 部署頁的 CONFIG_ENCRYPTION_KEY 欄位" width="700">
-
-將 **Build command** 設為 `npm run build`、**Deploy command** 設為 `npm run deploy`，資源名稱可保留預填值。關閉 **Enable Preview builds**，再開啟 **Protect with Cloudflare Access**，設定：
+資源名稱可保留預填值。關閉 **Enable Preview builds**，再開啟 **Protect with Cloudflare Access**，設定：
 
 - **Scope：All traffic**，保護正式與預覽部署
 - **Authentication policy：Cloudflare account**，限定你的 Cloudflare 帳戶成員登入
@@ -177,7 +165,7 @@ npm run build
 ## 安全機制
 
 - Cloudflare Access 是一般模式的登入閘道；Worker 會驗證 JWT 的簽章、issuer、audience 與有效期限。
-- 連接器帳密以 `CONFIG_ENCRYPTION_KEY` 衍生的金鑰進行 AES-GCM 加密，D1 只儲存密文。
+- 連接器帳密以自動產生或自行提供的金鑰進行 AES-GCM 加密，D1 只儲存密文。
 - 目前不支援金鑰輪替；若刪除或更換 Cloudflare 中的金鑰，必須重新設定所有連接器。
 
 ## 免責聲明

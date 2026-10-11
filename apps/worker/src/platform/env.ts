@@ -11,7 +11,9 @@ export interface Env {
   ASSETS: Fetcher;
   BROWSER: Fetcher;
   AI: Ai;
+  MEGABANK_EGRESS: DurableObjectNamespace;
   CONFIG_ENCRYPTION_KEY?: string;
+  GENERATED_CONFIG_ENCRYPTION_KEY?: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;

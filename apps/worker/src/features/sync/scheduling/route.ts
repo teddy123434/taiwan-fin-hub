@@ -23,11 +23,30 @@ const syncIntervalSchema = z
   );
 const preferredTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const preferredWeekdaySchema = z.number().int().min(0).max(6);
-const syncScheduleUpdateSchema = z.object({
-  intervalMinutes: syncIntervalSchema,
-  preferredTime: preferredTimeSchema,
-  preferredWeekday: preferredWeekdaySchema,
-});
+const preferredWeekdaysSchema = z
+  .array(preferredWeekdaySchema)
+  .min(1)
+  .max(7)
+  .refine((days) => new Set(days).size === days.length, "Duplicate weekdays.")
+  .transform((days) => [...days].sort((a, b) => a - b));
+const syncScheduleUpdateSchema = z
+  .object({
+    intervalMinutes: syncIntervalSchema,
+    preferredTime: preferredTimeSchema,
+    preferredWeekday: preferredWeekdaySchema.optional(),
+    preferredWeekdays: preferredWeekdaysSchema.optional(),
+  })
+  .refine(
+    (data) =>
+      data.preferredWeekdays !== undefined ||
+      data.preferredWeekday !== undefined,
+    "At least one weekday is required.",
+  )
+  .transform((data) => ({
+    intervalMinutes: data.intervalMinutes,
+    preferredTime: data.preferredTime,
+    preferredWeekdays: data.preferredWeekdays ?? [data.preferredWeekday!],
+  }));
 const syncJobUpdateSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -35,6 +54,7 @@ const syncJobUpdateSchema = z
     intervalMinutes: syncIntervalSchema.optional(),
     preferredTime: preferredTimeSchema.optional(),
     preferredWeekday: preferredWeekdaySchema.optional(),
+    preferredWeekdays: preferredWeekdaysSchema.optional(),
     scheduleMode: z.enum(["inherit", "custom"]).optional(),
   })
   .refine(

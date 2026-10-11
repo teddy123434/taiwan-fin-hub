@@ -1,4 +1,5 @@
 # Deploy to Cloudflare reads this file to show the initial deployment form.
 # Enable Worker Access in the GUI; Workers Builds discovers TEAM_DOMAIN and POLICY_AUD.
 # Local development uses apps/worker/.dev.vars.example instead.
-CONFIG_ENCRYPTION_KEY=replace-with-at-least-32-random-characters
+# Keep auto to generate a private key on the first deployment, or supply your own.
+CONFIG_ENCRYPTION_KEY=auto

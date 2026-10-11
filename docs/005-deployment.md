@@ -6,37 +6,42 @@
 
 - [Cloudflare 帳號](https://dash.cloudflare.com/sign-up)
 - [GitHub 帳號](https://github.com/signup)
-- 部署時填入的一組 `CONFIG_ENCRYPTION_KEY`
 
 Workers、D1、Queues、Workers AI 與 Browser Run 均有免費額度，但並非無限。需要瀏覽器的連接器會共用 Browser Run 額度；Workers Free Plan 目前每日包含 10 分鐘，最新限制請參考 [Browser Run Pricing](https://developers.cloudflare.com/browser-run/pricing/)。
 
 ## 一鍵部署細節
 
-### 1. 產生加密金鑰
+### 1. 選擇加密金鑰
+
+一般使用者將 `CONFIG_ENCRYPTION_KEY` 保留為預設值 `auto` 即可，無須自行產生金鑰。部署 script 會以安全隨機數產生 32 bytes 的金鑰，存入獨立的 `GENERATED_CONFIG_ENCRYPTION_KEY` Runtime Secret；後續部署只檢查 Secret 名稱並沿用，不會重新產生。`auto` 只是選擇自動模式的標記，不會用來加密資料。
+
+若需要用相同金鑰在本機 debug 正式資料、備份金鑰或搬移 D1，請在首次部署時改填自己的隨機金鑰，例如：
 
 ```bash
 openssl rand -hex 32
 ```
 
-`CONFIG_ENCRYPTION_KEY` 用來加密 D1 中的連接器設定，一般私人部署仍然需要。使用一鍵部署時只需填入一次，Cloudflare 會保存並在後續部署中沿用；沒有另外記下不會影響現有 Worker。若日後要重建 Worker、搬移環境或沿用既有 D1，則必須使用相同金鑰，否則需要重新設定所有連接器。建議需要災難復原能力的使用者將它保存在密碼管理器，並且不要在既有部署中任意更換或刪除。
+自行填入的金鑰直接存於 `CONFIG_ENCRYPTION_KEY`，Worker 會優先使用它；既有手動金鑰安裝更新後也會繼續沿用原值。請另外存入密碼管理器，重建或搬移時使用同一把金鑰。
+
+Cloudflare Secret 寫入後無法從 Dashboard 或 API 讀回，網站也不提供金鑰匯出。因此，自動模式適合持續使用同一個 Worker；需要掌握金鑰的使用者應在首次部署時自行填入。
+
+開始儲存加密資料後，請勿更換 `CONFIG_ENCRYPTION_KEY`、切換 `auto`／自訂模式，或刪除實際使用的 Secret。部署 script 在建立自動金鑰前，只查詢 D1 是否已有加密的連接器設定、推播訂閱或集保同步狀態；若有，便不產生新金鑰，避免遺失金鑰後誤建替代值。`auto` 模式缺少 `GENERATED_CONFIG_ENCRYPTION_KEY` 時，Worker 會拒絕加密／解密，不會退回使用 `auto` 字串。
 
 ### 2. 執行 Deploy to Cloudflare
 
-點擊 **Deploy to Cloudflare**，授權 Cloudflare 存取 GitHub，填入 `CONFIG_ENCRYPTION_KEY`，將 **Build command** 設為 `npm run build`、**Deploy command** 設為 `npm run deploy`。在同一頁關閉 **Enable Preview builds**，再開啟 **Protect with Cloudflare Access**，選擇 **All traffic** 與 **Cloudflare account**，確認後點擊 **Deploy**。
-
-<img src="../images/deploy-setup.png" alt="Cloudflare 部署頁的 CONFIG_ENCRYPTION_KEY 欄位" width="700">
+點擊 **Deploy to Cloudflare**，授權 Cloudflare 存取 GitHub，將 `CONFIG_ENCRYPTION_KEY` 保留為 `auto`（或填入自己的金鑰），將 **Build command** 設為 `npm run build`、**Deploy command** 設為 `npm run deploy`。在同一頁關閉 **Enable Preview builds**，再開啟 **Protect with Cloudflare Access**，選擇 **All traffic** 與 **Cloudflare account**，確認後點擊 **Deploy**。
 
 Cloudflare 會先建立 Worker，再於背景執行 build；頁面會自動跳轉至 **Builds**。GUI 會建立登入保護；部署 script 自動取得 Team domain 與 AUD，再部署包含 `TEAM_DOMAIN`、`POLICY_AUD` 的版本。在這兩個值完成前，API 的登入驗證不會成功。請等待該次 build 顯示成功，再點擊右上角的 **Visit** 開啟網站；若未出現 **Visit** 按鈕，請先重新整理 Worker 頁面。
 
 <a href="../images/deploy-success.png"><img src="../images/deploy-success.png" alt="Cloudflare build 成功畫面與右上角的 Visit 按鈕" width="700"></a>
 
-[Deploy to Cloudflare](https://developers.cloudflare.com/workers/platform/deploy-buttons/) 會從 repository 根目錄的 `.dev.vars.example` 讀取部署時需要填寫的 Secret，並從 `package.json` 取得欄位說明。本專案將正式部署範例與 `apps/worker/.dev.vars.example` 的本機開發設定分開，初始表單只保留加密金鑰；多 Application、Demo、本機開發與 VAPID 參數不需在首次部署填寫。
+[Deploy to Cloudflare](https://developers.cloudflare.com/workers/platform/deploy-buttons/) 會從 repository 根目錄的 `.dev.vars.example` 讀取部署時需要填寫的 Secret，並從 `package.json` 取得欄位說明。本專案將正式部署範例與 `apps/worker/.dev.vars.example` 的本機開發設定分開，初始表單只保留預設為 `auto` 的 `CONFIG_ENCRYPTION_KEY`；自動產生的金鑰、多 Application、Demo、本機開發與 VAPID 參數不需在首次部署填寫。
 
 `.dev.vars.example` 定義 Worker Secret 欄位；Access 的開關、Scope、登入政策及期限需在 Cloudflare GUI 選擇。部署頁的登入期限最多可選 **7 days**，後續可在 Zero Trust [延長登入期限](#延長登入期限)。**Project name** 預設為 `all-set-tw`，由 `wrangler.toml` 的 `name` 定義；D1／Queue 的預填名稱也定義於同一檔案。請確認 **Deploy command** 為 `npm run deploy`；若 GUI 預填 `npx wrangler deploy`，需改為本專案的指令，才能執行完整設定。
 
 **Enable Preview builds** 是 [Workers Builds 的分支建置設定](https://developers.cloudflare.com/workers/ci-cd/builds/build-branches/)，目前沒有官方支援的 Wrangler 設定或一鍵部署參數可指定其預設值，請在部署頁手動關閉。若已部署，可在 **Worker → Settings → Builds → Branch control** 關閉。`wrangler.toml` 的 `preview_urls = false` 只關閉 Version URLs，不會停止非正式分支的自動建置。
 
-既有 Workers Builds 與部署 script 的 Secret 查詢會沿用已連接的 Worker 名稱，因此更新會保留原本的 Worker、Access 驗證值與 VAPID 金鑰。本機更新舊 Worker 時，請在私人 Wrangler 設定保留原本的 `name`，或於部署時指定 `--name`。
+既有 Workers Builds 與部署 script 的 Secret 查詢會沿用已連接的 Worker 名稱，因此更新會保留原本的 Worker、加密金鑰、Access 驗證值與 VAPID 金鑰。本機更新舊 Worker 時，請在私人 Wrangler 設定保留原本的 `name`，或於部署時指定 `--name`。
 
 `TEAM_DOMAIN` 與 `POLICY_AUD` 可以存入私人 `.dev.vars` 作本機測試，但 `.dev.vars` 不會自動同步到正式 Worker；首次建立 Access Application 時，仍需先取得該帳戶的 Team domain 與新產生的 AUD。
 
@@ -55,7 +60,7 @@ Cloudflare GUI 的 **Deploy command：`npm run deploy`** 會執行 `scripts/depl
 初次部署的流程如下：
 
 1. 在部署頁開啟 **Protect with Cloudflare Access**，由 Cloudflare GUI 建立登入保護並保存選定的政策與期限。
-2. 部署 Worker，保留填入的加密金鑰並產生或沿用 VAPID 金鑰。
+2. 部署 Worker，初始化或沿用自動加密金鑰、保留自訂金鑰，並產生或沿用 VAPID 金鑰。
 3. 使用原有部署 token 查詢帳戶的 Workers subdomain，向正式 `workers.dev` 網址送出帶有 `cf-access-metadata-request: true` 的 HEAD 請求；不跟隨登入轉址，也不傳送 API token。
 4. 驗證回傳的簽章 metadata：僅接受 Cloudflare Access Team domain 的 RS256 簽章、相符的 Worker hostname、有效的 Application AUD 與簽發時間。此方式沿用官方 [`cloudflared` 的 Access discovery](https://github.com/cloudflare/cloudflared/blob/master/token/token.go)，不需要查詢 Access API。
 5. 從已驗證 metadata 的 `auth_domain` 與 `aud` 取得 `TEAM_DOMAIN`、`POLICY_AUD`，透過 `wrangler deploy --secrets-file` 部署為 Runtime Secrets。既有加密金鑰、VAPID 與其他 Secrets 會保留。
@@ -70,7 +75,7 @@ Cloudflare GUI 的 **Deploy command：`npm run deploy`** 會執行 `scripts/depl
 
 ### 部署成功但缺少 Access 驗證值
 
-檢查 build log 的 **Executing user deploy command**。若為 `npx wrangler deploy`，只會部署 Worker，會跳過本專案的資料庫 migration、VAPID 金鑰與 Access 驗證值設定。前往 **Worker → Settings → Builds**，將 **Deploy command** 改為 `npm run deploy`，再重試 build。首次 Access 自動設定成功時，log 會出現 `[deploy] TEAM_DOMAIN and POLICY_AUD configured automatically.`。
+檢查 build log 的 **Executing user deploy command**。若為 `npx wrangler deploy`，只會部署 Worker，會跳過本專案的資料庫 migration、自動加密金鑰、VAPID 金鑰與 Access 驗證值設定。前往 **Worker → Settings → Builds**，將 **Deploy command** 改為 `npm run deploy`，再重試 build。首次 Access 自動設定成功時，log 會出現 `[deploy] TEAM_DOMAIN and POLICY_AUD configured automatically.`。
 
 ### 啟用登入保護
 
@@ -103,13 +108,14 @@ Cloudflare 在 [2026-08-14 改版](https://developers.cloudflare.com/changelog/p
 
 AUD 的官方取得方式請參考 [Get your AUD tag](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/#get-your-aud-tag)。一般私人部署只需要加密金鑰與這兩個 Access 值：
 
-| 參數                    | 一般私人部署                   | 用途                                           |
-| ----------------------- | ------------------------------ | ---------------------------------------------- |
-| `CONFIG_ENCRYPTION_KEY` | 首次部署填入，後續沿用         | 加密連接器設定                                 |
-| `TEAM_DOMAIN`           | 雲端部署自動設定，亦可手動設定 | JWT issuer 與簽章公鑰來源                      |
-| `POLICY_AUD`            | 雲端部署自動設定，亦可手動設定 | 保護此 Worker 的 Application AUD               |
-| `LOCAL_DEV_MODE`        | 不需設定，預設關閉             | 本機開發範例設為 `true`，僅略過 localhost 驗證 |
-| `VAPID_*`               | 部署 script 自動產生並保留金鑰 | 本機測試推播時自行設定                         |
+| 參數                              | 一般私人部署                    | 用途                                           |
+| --------------------------------- | ------------------------------- | ---------------------------------------------- |
+| `CONFIG_ENCRYPTION_KEY`           | 保留 `auto`，或首次填入自訂金鑰 | 選擇自動模式，或直接提供加密金鑰               |
+| `GENERATED_CONFIG_ENCRYPTION_KEY` | 部署 script 自動產生並保留      | `auto` 模式實際使用的加密金鑰                  |
+| `TEAM_DOMAIN`                     | 雲端部署自動設定，亦可手動設定  | JWT issuer 與簽章公鑰來源                      |
+| `POLICY_AUD`                      | 雲端部署自動設定，亦可手動設定  | 保護此 Worker 的 Application AUD               |
+| `LOCAL_DEV_MODE`                  | 不需設定，預設關閉              | 本機開發範例設為 `true`，僅略過 localhost 驗證 |
+| `VAPID_*`                         | 部署 script 自動產生並保留金鑰  | 本機測試推播時自行設定                         |
 
 本專案仍由 Worker 驗證 Access JWT，因此需要 `TEAM_DOMAIN` 與 `POLICY_AUD`。Cloudflare 提供的 `ctx.access` 目前無法通過 Static Assets 的內部 router 傳入本專案的 Worker，詳見官方的 [`ctx.access` limitations](https://developers.cloudflare.com/workers/configuration/cloudflare-access/#ctxaccess-limitations)。
 
@@ -202,7 +208,7 @@ workflow 會：
 
 ## 組建版本資訊
 
-「關於」頁面顯示 `TedLin1993/all-set-tw` 的上游 Commit、追蹤分支 `main` 與本次部署的 UTC 組建時間，並可一次複製診斷資訊。
+「關於」頁面顯示 `TedLin1993/all-set-tw` 的上游 Commit、追蹤分支 `main` 與本次部署的台灣組建時間（`Asia/Taipei`，UTC+8），並可一次複製診斷資訊。
 `scripts/build-info.mjs` 在 Vite 組建時辨識採用的上游版本，再由 `apps/web/vite.config.ts` 寫入前端產物。
 
 - 官方 repository 的 checkout 使用 `HEAD` 作為上游 Commit。
@@ -229,6 +235,10 @@ npm run dev
 ```
 
 範例設定中的 D1 與 Workers AI 使用 remote binding，會連到 Cloudflare 資源。請使用獨立的開發 D1，不要直接操作正式資料。
+
+兆豐對外請求使用 `MegabankEgress` Durable Object。根目錄 `wrangler.toml` 與 `apps/worker/wrangler.local.toml.example` 都有這個 binding 與 SQLite migration；已存在的私人 `wrangler.local.toml` 要自行補上相同設定，否則本機同步缺少 binding。部署時 Wrangler 會建立物件，不需要額外 Secret。Workers 免費方案可使用 SQLite Durable Objects。
+
+本機 `apps/worker/.dev.vars.example` 保留手動金鑰設定；請填入開發用隨機金鑰。若需解密正式資料，正式部署也必須在最初自行提供並保存相同金鑰；公開部署範例的 `auto` 只會由部署 script 初始化。
 
 SQL migrations 位於 `apps/worker/migrations/`。根目錄 `wrangler.toml` 的 `migrations_dir` 使用 `apps/worker/migrations`；`apps/worker/wrangler.local.toml` 使用相對於該設定檔的 `migrations`。若已建立私人 Wrangler 設定，請同步更新其 migration 路徑；既有 migration 檔名與內容維持原樣。
 
@@ -260,4 +270,6 @@ XDG_CONFIG_HOME=.wrangler-config node scripts/deploy-with-vapid.mjs \
 
 執行前請再次確認 `database_id`、Worker 名稱與所有 bindings 都指向預期環境。資料庫 migration 會修改遠端 schema，不要使用未確認的正式資料庫進行測試。
 
-若既有 D1 已儲存連接器設定，部署時也必須提供原本相同的 `CONFIG_ENCRYPTION_KEY`；新的隨機金鑰無法解密既有資料。
+若既有 D1 已儲存加密資料，部署時必須沿用原本的實際金鑰。手動模式使用相同的 `CONFIG_ENCRYPTION_KEY`；自動模式需要原 Worker 的 `GENERATED_CONFIG_ENCRYPTION_KEY`，不能只在新 Worker 填入 `auto`。新的隨機金鑰無法解密既有資料，部署 script 也不會為已有加密資料的 D1 建立替代金鑰。
+
+若自動金鑰遺失，需還原原本的 Secret；無法還原時，既有加密資料無法解密。舊版手動金鑰部署即使沒有 `GENERATED_CONFIG_ENCRYPTION_KEY`，仍會使用原本的金鑰並可繼續更新。

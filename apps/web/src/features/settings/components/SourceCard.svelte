@@ -15,6 +15,7 @@
     getSyncSourceStatusLabel,
   } from "@/data/connectors/sync-status";
   import { formatDateTime } from "@/shared/format/financial";
+  import { formatScheduleWeekdays } from "../model/schedule";
   let {
     api,
     id,
@@ -50,7 +51,6 @@
     getSyncSourceStatus(job, $settings.data?.configured ?? job?.configured),
   );
   const needsAction = $derived(sourceStatus === "needs_action");
-  const weekdays = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
   const scheduleLabel = $derived(
     !job?.enabled
       ? "關閉"
@@ -59,7 +59,7 @@
         : job.intervalMinutes === 1440
           ? `每天 ${job.preferredTime}`
           : job.intervalMinutes === 10080
-            ? `每${weekdays[job.preferredWeekday] ?? "週一"} ${job.preferredTime}`
+            ? `${formatScheduleWeekdays(job.preferredWeekdays)} ${job.preferredTime}`
             : `每 ${job.intervalMinutes / 60} 小時`,
   );
   const SourceIcon = $derived(

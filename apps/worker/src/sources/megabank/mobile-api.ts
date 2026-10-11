@@ -9,6 +9,7 @@ import {
 } from "./protocol";
 import {
   application,
+  appVersion,
   clientPublicKey,
   clientToken,
   detailVersion,
@@ -46,6 +47,30 @@ export type MegabankDevice = {
   deviceCode: string;
   deviceUKey: string;
   deviceSeed: string;
+};
+
+/** 只允許固定協定欄位；不得傳遞原始回應、裝置識別或工作階段。 */
+export type MegabankDiagnostic =
+  | {
+      event: "megabank_login_result";
+      code: string;
+      resultType: string;
+      highIpFar: boolean | null;
+      secondFactorFlag: "Y" | "N" | "unknown";
+    }
+  | {
+      event: "megabank_sms_gate";
+      resource: string;
+      code: "SYS014";
+      action: "request_sms" | "manual_required";
+    };
+
+type MegabankSessionOptions = {
+  onDevice?: (
+    device: MegabankDevice,
+    source: "stored" | "generated" | "pending_session",
+  ) => Promise<void>;
+  onDiagnostic?: (diagnostic: MegabankDiagnostic) => void;
 };
 
 export type MegabankCaptchaChallenge = {
@@ -100,6 +125,7 @@ export class MegabankProtocolError extends Error {
   constructor(
     message = "兆豐銀行回應格式已變更。",
     readonly code?: string,
+    readonly resource?: string,
   ) {
     super(message);
     this.name = "MegabankProtocolError";
@@ -124,9 +150,13 @@ export function requireMegabankCredentials(
 export async function prepareMegabankCaptcha(
   config: MegabankConfig,
   fetcher: Fetcher = globalThis.fetch.bind(globalThis),
+  options: MegabankSessionOptions = {},
 ): Promise<MegabankCaptchaChallenge> {
   requireMegabankCredentials(config);
-  const session = new MegabankSession(fetcher, megabankDevice(config));
+  const device = megabankDevice(config);
+  const session = new MegabankSession(fetcher, device, options.onDiagnostic);
+  // 先由同步邊界保存裝置，再向銀行建立連線；初始化或 OCR 失敗也不能遺失識別。
+  await options.onDevice?.(session.device(), device ? "stored" : "generated");
   await session.bootstrap();
   const image = await session.resource(
     "prelogin",
@@ -173,7 +203,7 @@ export function createMegabankConnector(
     bytes: ArrayBuffer,
     contentType: string,
   ) => Promise<string>,
-  options: { allowOtpRequest?: boolean } = {},
+  options: MegabankSessionOptions & { allowOtpRequest?: boolean } = {},
 ) {
   return {
     id: "megabank" as const,
@@ -183,7 +213,11 @@ export function createMegabankConnector(
       _cursor?: string,
     ): Promise<SyncResult<never>> {
       const credentials = requireMegabankCredentials(config);
-      const pending = restorePendingSession(config, fetcher);
+      const pending = restorePendingSession(
+        config,
+        fetcher,
+        options.onDiagnostic,
+      );
       if (config.otp) {
         if (!pending?.session.isAuthenticated() || !pending.active) {
           await pending?.session.logout();
@@ -191,6 +225,7 @@ export function createMegabankConnector(
             "兆豐銀行簡訊驗證已逾時，請重新取得圖形驗證碼。",
           );
         }
+        await options.onDevice?.(pending.session.device(), "pending_session");
         return completeVerifiedSync(
           pending.session,
           config.otp,
@@ -206,8 +241,13 @@ export function createMegabankConnector(
       let captcha = config.captcha;
       if (pending?.active && !pendingWasAuthenticated) {
         session = pending.session;
+        await options.onDevice?.(session.device(), "pending_session");
       } else {
-        const challenge = await prepareMegabankCaptcha(config, fetcher);
+        const challenge = await prepareMegabankCaptcha(
+          config,
+          fetcher,
+          options,
+        );
         if (!recognizeCaptcha) {
           throw new MegabankVerificationRequiredError(
             "兆豐銀行同步需要先完成圖形驗證。",
@@ -220,6 +260,7 @@ export function createMegabankConnector(
         session = MegabankSession.deserialize(
           challenge.pendingSession,
           fetcher,
+          options.onDiagnostic,
         );
       }
       if (!captcha || !/^\d{5}$/.test(captcha)) {
@@ -246,10 +287,16 @@ export function createMegabankConnector(
           ) {
             throw error;
           }
+          options.onDiagnostic?.({
+            event: "megabank_sms_gate",
+            resource: error.resource ?? "unknown",
+            code: "SYS014",
+            action: options.allowOtpRequest ? "request_sms" : "manual_required",
+          });
         }
         if (!options.allowOtpRequest) {
           throw new MegabankVerificationRequiredError(
-            "兆豐銀行要求簡訊驗證，請改用手動同步並輸入簡訊驗證碼。",
+            "兆豐銀行查詢權限不足，且登入回報異地驗證；請改用手動同步完成簡訊驗證。",
           );
         }
         const checkCode = await session.requestVerifyCode("sms");
@@ -267,13 +314,21 @@ export function createMegabankConnector(
   };
 }
 
-function restorePendingSession(config: MegabankConfig, fetcher: Fetcher) {
+function restorePendingSession(
+  config: MegabankConfig,
+  fetcher: Fetcher,
+  onDiagnostic?: MegabankSessionOptions["onDiagnostic"],
+) {
   if (!config.pendingSession) return undefined;
   const expiresAt = config.pendingSessionExpiresAt ?? "";
   const active = Date.parse(expiresAt) > Date.now();
   try {
     return {
-      session: MegabankSession.deserialize(config.pendingSession, fetcher),
+      session: MegabankSession.deserialize(
+        config.pendingSession,
+        fetcher,
+        onDiagnostic,
+      ),
       expiresAt,
       active,
     };
@@ -511,6 +566,7 @@ class MegabankSession {
   constructor(
     private readonly fetcher: Fetcher,
     device?: MegabankDevice,
+    private readonly onDiagnostic?: MegabankSessionOptions["onDiagnostic"],
   ) {
     if (device) {
       this.deviceCode = device.deviceCode;
@@ -527,7 +583,11 @@ class MegabankSession {
     };
   }
 
-  static deserialize(serialized: string, fetcher: Fetcher): MegabankSession {
+  static deserialize(
+    serialized: string,
+    fetcher: Fetcher,
+    onDiagnostic?: MegabankSessionOptions["onDiagnostic"],
+  ): MegabankSession {
     let state: SessionState;
     try {
       state = JSON.parse(serialized) as SessionState;
@@ -550,7 +610,7 @@ class MegabankSession {
         "兆豐銀行驗證工作階段已失效，請重新取得驗證碼。",
       );
     }
-    const session = new MegabankSession(fetcher);
+    const session = new MegabankSession(fetcher, undefined, onDiagnostic);
     session.authenticated = state.authenticated === true;
     session.accessToken = state.accessToken;
     session.xAuthToken = state.xAuthToken || "";
@@ -656,7 +716,25 @@ class MegabankSession {
       "login",
       true,
     );
-    const code = stringAt(response, "code");
+    const code = safeBankCode(response);
+    const loginData = dataAt(response);
+    const resultType = stringAt(loginData, "resultType");
+    const secondFactorFlag = stringAt(loginData, "secondFactorFlag");
+    this.onDiagnostic?.({
+      event: "megabank_login_result",
+      code,
+      resultType: /^(?:[0-9]|1[0-2])$/.test(resultType)
+        ? resultType
+        : "unknown",
+      highIpFar:
+        typeof loginData.isHighIpFar === "boolean"
+          ? loginData.isHighIpFar
+          : null,
+      secondFactorFlag:
+        secondFactorFlag === "Y" || secondFactorFlag === "N"
+          ? secondFactorFlag
+          : "unknown",
+    });
     if (code === "0113") {
       throw new MegabankVerificationRequiredError(
         "兆豐銀行圖形驗證碼錯誤，請重新取得驗證碼。",
@@ -667,7 +745,6 @@ class MegabankSession {
         "兆豐銀行登入未通過，請至官方 App 確認登入資料或驗證要求。",
       );
     }
-    const loginData = dataAt(response);
     this.authenticated = true;
     await this.adapterRequest("resource/login", {});
     // secondFactorFlag 為 Y 仍須雙重驗證；異地旗標交由查詢結果決定是否進入簡訊流程。
@@ -698,13 +775,10 @@ class MegabankSession {
       "high-far",
       true,
     );
-    const resultCode = stringAt(response, "code");
+    const resultCode = safeBankCode(response);
     if (resultCode !== "0000") {
-      const safeCode = /^[A-Za-z0-9_-]{1,32}$/.test(resultCode)
-        ? resultCode
-        : "unknown";
       throw new MegabankVerificationRequiredError(
-        `兆豐銀行簡訊驗證失敗（代碼 ${safeCode}），請重新取得圖形驗證碼。`,
+        `兆豐銀行簡訊驗證失敗（代碼 ${resultCode}），請重新取得圖形驗證碼。`,
       );
     }
     return dataAt(response).success === true;
@@ -747,7 +821,7 @@ class MegabankSession {
       platform: "Android",
       version: "16",
       network: "wifi",
-      appVer: "2.5.19",
+      appVer: appVersion,
       appDetailVer: detailVersion,
       clientNo: this.clientNo,
       clientTime: String(Date.now()),
@@ -773,12 +847,14 @@ class MegabankSession {
         ...(this.xAuthToken ? { "x-auth-token": this.xAuthToken } : {}),
       },
     );
-    const rawCode = stringAt(result, "code");
-    const code = /^[A-Za-z0-9_-]{1,32}$/.test(rawCode) ? rawCode : "unknown";
+    const code = safeBankCode(result);
     if (!skipCodeCheck && code !== "0000" && code !== "1120") {
       throw new MegabankProtocolError(
-        `兆豐銀行查詢失敗（代碼 ${code}）。${code === "SYS014" ? "若目前已登入兆豐網銀，請登出後再試。" : ""}`,
+        code === "SYS014"
+          ? "兆豐銀行查詢權限不足（代碼 SYS014），請稍後重試或至官方 App 確認登入狀態。"
+          : `兆豐銀行查詢失敗（代碼 ${code}）。`,
         code,
+        resource,
       );
     }
     return result;
@@ -902,6 +978,10 @@ export function encryptLogin(
 
 function md5(value: string): string {
   return forge.md.md5.create().update(value, "utf8").digest().toHex();
+}
+function safeBankCode(response: JsonRecord): string {
+  const code = stringAt(response, "code");
+  return /^[A-Za-z0-9_-]{1,32}$/.test(code) ? code : "unknown";
 }
 function dataAt(value: unknown): JsonRecord {
   return isRecord(value) && isRecord(value.rsData) ? value.rsData : {};

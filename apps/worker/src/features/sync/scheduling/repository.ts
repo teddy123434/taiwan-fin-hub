@@ -21,6 +21,7 @@ export type DefaultSyncSchedule = {
   intervalMinutes: number;
   preferredTime: string;
   preferredWeekday: number;
+  preferredWeekdays: number[];
   timezone: "Asia/Taipei";
   updatedAt: string;
 };
@@ -32,6 +33,10 @@ export async function findDefaultSyncSchedule(db: D1Database) {
         intervalMinutes: syncScheduleSettings.intervalMinutes,
         preferredTime: syncScheduleSettings.preferredTime,
         preferredWeekday: syncScheduleSettings.preferredWeekday,
+        preferredWeekdays:
+          sql`COALESCE(${syncScheduleSettings.preferredWeekdays}, json_array(${syncScheduleSettings.preferredWeekday}))`.mapWith(
+            syncScheduleSettings.preferredWeekdays,
+          ),
         timezone: sql<
           DefaultSyncSchedule["timezone"]
         >`${syncScheduleSettings.timezone}`,
@@ -63,7 +68,7 @@ export async function saveDefaultSyncSchedule(
   input: {
     intervalMinutes: number;
     preferredTime: string;
-    preferredWeekday: number;
+    preferredWeekdays: number[];
     updatedAt: string;
     inheritedJobs: Array<{ id: string; nextRunAt: string }>;
   },
@@ -72,32 +77,35 @@ export async function saveDefaultSyncSchedule(
     db
       .prepare(
         `INSERT INTO sync_schedule_settings (
-         id, interval_minutes, preferred_time, preferred_weekday, timezone, updated_at
-       ) VALUES ('default', ?, ?, ?, 'Asia/Taipei', ?)
+         id, interval_minutes, preferred_time, preferred_weekday, preferred_weekdays, timezone, updated_at
+       ) VALUES ('default', ?, ?, ?, ?, 'Asia/Taipei', ?)
        ON CONFLICT(id) DO UPDATE SET
          interval_minutes = excluded.interval_minutes,
          preferred_time = excluded.preferred_time,
          preferred_weekday = excluded.preferred_weekday,
+         preferred_weekdays = excluded.preferred_weekdays,
          timezone = excluded.timezone,
          updated_at = excluded.updated_at`,
       )
       .bind(
         input.intervalMinutes,
         input.preferredTime,
-        input.preferredWeekday,
+        input.preferredWeekdays[0],
+        JSON.stringify(input.preferredWeekdays),
         input.updatedAt,
       ),
     ...input.inheritedJobs.map((job) =>
       db
         .prepare(
           `UPDATE sync_jobs
-         SET interval_minutes = ?, preferred_time = ?, preferred_weekday = ?, next_run_at = ?, updated_at = ?
+         SET interval_minutes = ?, preferred_time = ?, preferred_weekday = ?, preferred_weekdays = ?, next_run_at = ?, updated_at = ?
          WHERE id = ?`,
         )
         .bind(
           input.intervalMinutes,
           input.preferredTime,
-          input.preferredWeekday,
+          input.preferredWeekdays[0],
+          JSON.stringify(input.preferredWeekdays),
           job.nextRunAt,
           input.updatedAt,
           job.id,
@@ -119,6 +127,7 @@ export async function listSyncJobs(db: D1Database) {
       scheduleMode: sql<SyncScheduleMode>`${syncJobs.scheduleMode}`,
       preferredTime: syncJobs.preferredTime,
       preferredWeekday: syncJobs.preferredWeekday,
+      preferredWeekdays: syncJobSelection.preferred_weekdays,
       lockedUntil: syncJobs.lockedUntil,
       lockedBy: syncJobs.lockedBy,
       lockTrigger: sql<SyncTrigger | null>`${syncJobs.lockTrigger}`,
@@ -167,7 +176,7 @@ export async function updateSyncJob(
     intervalMinutes: number;
     scheduleMode: SyncScheduleMode;
     preferredTime: string;
-    preferredWeekday: number;
+    preferredWeekdays: number[];
     updatedAt: string;
   },
 ) {
@@ -180,6 +189,7 @@ export async function updateSyncJob(
          schedule_mode = ?,
          preferred_time = ?,
          preferred_weekday = ?,
+         preferred_weekdays = ?,
          updated_at = ?
      WHERE connector_id = ?
        AND scope = ?`,
@@ -190,7 +200,8 @@ export async function updateSyncJob(
       input.intervalMinutes,
       input.scheduleMode,
       input.preferredTime,
-      input.preferredWeekday,
+      input.preferredWeekdays[0],
+      JSON.stringify(input.preferredWeekdays),
       input.updatedAt,
       connectorId,
       scope,

@@ -414,9 +414,10 @@ OTP 通過後，國泰可能先顯示「密碼已超過半年未更新」提醒�
 - 台新登入後若出現「訊息通知／每三個月變更一次密碼」彈窗，必須點「關閉」後再抓資料。不得點「前往修改」或「3個月後提醒」，也不得停在彈窗卻因為 session API 仍可用而回報同步成功。
 - session 確認成功後重新取得當前 frame，最多等待 15 秒讓登入後頁面掛載 `popupLoginChangePwd`。`PwdExpired` cookie 尚在時需等待通知顯示，直接觸發該通知內 `button[data-action="hide"]` 的官方 click handler；最多等 5 秒確認 `active` 已移除且銀行的關閉處理已清除 `PwdExpired`，才查詢資料。頁面未就緒、按鈕缺失或關閉失敗均中止同步，不吞掉錯誤。
 - 重用已確認有效的 session 時，經 session 檢查的 frame 不一定掛載登入後通知元件；該 frame 沒有通知與 `PwdExpired` 時可直接查詢，不等待一次並未發生的新登入。已有通知或提醒 cookie 時仍須完成上述關閉流程。
-- 自動登入分別限制最多辨識六張新驗證碼、最多向銀行送出三次登入請求。辨識結果若不符合頁面要求的數字位數，不送出登入，也不扣登入額度；重新載入頁面取得新驗證碼。驗證碼只擷取 `img._field_item__verify-code`，且圖片路徑必須為 `/TIBNetBank/svc/web/shuffle/NonSessionShuffle`；等待圖片完整載入及可見尺寸就緒，不退回選取其他圖片。每輪在記憶體比對本次登入已辨識圖片的 SHA-256 摘要；重複圖片先重新載入一次，仍重複則以換圖失敗停止，不重複辨識、不送出登入。只有明確的驗證碼錯誤可以重試，帳密遭拒或登入結果不明時立即停止。耗盡辨識或登入額度時改由使用者人工驗證，訊息分別說明辨識上限與實際送出次數。
-- 驗證碼圖片在就緒檢查後消失、隱藏或變成零尺寸，視為登入前驗證碼未就緒；首次準備沿用共用流程最多三次新 session 嘗試，後續換圖沿用原有頁面重載上限。圖片取得失敗不辨識、不送出登入，也不扣登入請求額度；保留原始錯誤供準備診斷，最終訊息說明圖片尚未顯示或已更新。
-- 每輪自動登入記錄辨識次數、當輪及累計登入請求數、結果分類、圖片尺寸／位元組數、換圖結果、額外重新載入次數與耗時。`imageChanged` 首輪為 `null`，後續表示圖片尚未在本次登入辨識過；重複圖重新載入後仍重複時，結果為 `captcha_unchanged`。共用 OCR 的 `captcha_ocr_failed` 日誌區分回應結構不符（`invalid_response`）、空回覆（`empty_output`）、輸出截斷（`truncated_output`）、位數不符（`wrong_length`）與額外文字／字元（`unexpected_characters`），只記模型、預期位數、回覆長度、白名單 `finishReason`、圖片位元組數及辨識耗時。日誌不得記錄驗證碼、模型回覆內容、圖片、圖片摘要或帳密；辨識格式與模型參數維持原有規則。
+- 自動登入分別限制最多辨識六張新驗證碼、最多向銀行送出三次登入請求。辨識結果若不符合頁面要求的數字位數，不送出登入，也不扣登入額度；在同一表單觸發驗證碼圖片的官方 `genAuth` click handler 取得新圖。每輪在記憶體比對本次登入已辨識圖片的 SHA-256 摘要；重複圖片額外官方換圖一次，仍重複則以換圖失敗停止，不重複辨識、不送出登入。只有明確的驗證碼錯誤可以重試，帳密遭拒或登入結果不明時立即停止。耗盡辨識或登入額度時改由使用者人工驗證，訊息分別說明辨識上限與實際送出次數。
+- 官方換圖前先註冊 request／response 等待，只接受目前登入 frame 的 `POST /TIBNetBank/svc/web/login/getToken`，並以同一個 request 配對其 response，避免較早的遲到回應滿足本次換圖。Token 回應須為 HTTP 成功、`RESULT = NORMAL` 且帶有非空 `ECTOKEN`；圖片回應須屬於同一 frame、台新 origin 與 `/TIBNetBank/svc/web/shuffle/NonSessionShuffle` 路徑，且 `TOKEN` 對應這次的 `ECTOKEN`。驗證碼只擷取 `img._field_item__verify-code`，須完整載入、解碼及具有可見尺寸；換圖後的 DOM 圖片來源須等於配對的圖片回應網址，截圖後再次檢查圖片仍連接於文件且來源未變，不退回選取其他圖片。
+- 驗證碼圖片在就緒檢查後消失、隱藏、變成零尺寸、解碼失敗或在截圖時更新，視為登入前驗證碼未就緒；自動登入首次準備沿用共用流程最多三次新 session 嘗試。人工驗證與未帶初始圖片的登入，首次擷取失敗後最多官方換圖一次；後續官方換圖未完成或取得無效圖片時停止。圖片取得失敗不辨識、不送出登入，也不扣登入請求額度；保留原始錯誤供準備診斷，最終訊息區分 Token 無效、換圖未完成與圖片尚未就緒。
+- 每輪自動登入記錄辨識次數、當輪及累計登入請求數、結果分類、圖片尺寸／位元組數、換圖結果、當輪官方換圖次數與耗時。`imageChanged` 首輪為 `null`，後續表示圖片尚未在本次登入辨識過；重複圖再次換圖後仍重複時，結果為 `captcha_unchanged`。`taishin_captcha_captured` 記錄初始／換圖擷取與圖片尺寸／位元組數；`taishin_captcha_refresh` 記錄 Token 與圖片 HTTP 狀態、白名單 Token 結果、來源網址是否更新、失敗階段及耗時。來源網址更新不等同圖片內容更新，內容仍由上述記憶體摘要比對保護。共用 OCR 的 `captcha_ocr_failed` 日誌區分回應結構不符（`invalid_response`）、空回覆（`empty_output`）、輸出截斷（`truncated_output`）、位數不符（`wrong_length`）與額外文字／字元（`unexpected_characters`），只記模型、預期位數、回覆長度、白名單 `finishReason`、圖片位元組數及辨識耗時。日誌不得記錄完整圖片網址、Token、驗證碼、模型回覆內容、圖片、圖片摘要或帳密；辨識格式與模型參數維持原有規則。
 
 #### 存款查詢
 
@@ -463,6 +464,27 @@ OTP 通過後，國泰可能先顯示「密碼已超過半年未更新」提醒�
 2026-10-07 已以真實帳戶通過本機自動登入、密碼通知關閉、完整手動同步、session 重用及重複同步不新增副本；帳單已繳清時的未出帳負債已與官方畫面、本機 D1、API 及資產頁核對一致。其他帳務逐項核對、Richart 可見範圍、人工驗證、排程與 Cloudflare 部署環境的實際操作仍待驗收。
 
 ### 中國信託銀行
+
+連接器的 `appVer` 使用 `5.2.26`；2026-10-10 核對
+[Google Play 台灣版](https://play.google.com/store/apps/details?id=com.chinatrust.mobilebank&hl=zh_TW&gl=TW)
+與 [App Store 台灣版](https://apps.apple.com/tw/app/id417698185) 的公開最新版均為此版本。
+`webVer` 維持已確認 App 協定中的 `20260722182433427`，不以商店更新日期代替。
+
+登入的 `ctbc_mobile_resource_failed` 與 `ctbc_login_verification_required` 事件提供下列去識別診斷：
+
+| 欄位                | 意義                                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `httpStatus`        | 銀行 API 實際 HTTP status，與本專案 `/ctbc/sync` 回傳的 `502` 分開。                                         |
+| `loginAttempt`      | 本次同步的登入請求次數，從 1 開始，包含裝置或重複登入確認。                                                  |
+| `confirmationType`  | 目前請求為 `initial`、`device` 或 `duplicate`。                                                              |
+| `appVer`、`webVer`  | 連接器實際送出的公開版本欄位。                                                                               |
+| `statusCodeType`    | 區分 `missing`、`null` 與欄位型別；既有 `statusCode: ""` 可能來自缺少欄位、`null` 或空字串。                 |
+| `descCategory`      | `app_update_prompt` 表示描述含「更新至最新版本」，其他非空文字為 `other`，缺少文字為 `missing`；不記錄原文。 |
+| `hasRsData`         | 回應是否包含可讀取的 `rsData` 物件。                                                                         |
+| `verificationFlags` | 只記錄裝置／重複登入確認、裝置綁定、OTP、二階段及既有驗證判定的固定布林欄位，不記錄任意回應欄位名稱或值。    |
+
+診斷不包含帳密、帳號、cookie、token、OTP、原始 HTML 或確認時間戳。
+`SVC/0131` 與更新提示分類只能描述回應訊號，不代表已確認根因；原有錯誤分類與登入確認流程維持不變。
 
 信用卡帳單端點 `/twrbm-card/qu002/010` 的 `cardDataList` 明確為空陣列且 `billData` 為空物件，或其 `message` 明確回覆無卡時，保留存款與交易，略過信用卡摘要、未出帳與即時消費查詢。缺少欄位不觸發此判斷；需要驗證的回應優先保留原分類。無卡文案只用於此端點，不把 `8888` 或 `ESB/9201` 直接解讀為無卡，登入後仍執行登出。
 
@@ -586,14 +608,17 @@ OTP 通過後，國泰可能先顯示「密碼已超過半年未更新」提醒�
 ### 兆豐銀行
 
 - 使用 App 2.5.19 的 MobileFirst API：OAuth client credentials、`/main/init`、App 初始化、五位數字驗證碼、E2EE RSA／TripleDES 帳密登入。一般登入不要求快速登入或裝置綁定。
+- 對 `https://mobile.megabank.com.tw` 的 POST 由單一 SQLite Durable Object `MegabankEgress` 轉送。物件名稱固定為 `megabank`，`locationHint` 為 `apac`，只在首次建立時決定機房，之後手動同步與 Queue 排程都從該機房連出。只允許這個 host 的 POST。Workers 免費方案可使用 SQLite Durable Objects，每日包含 100,000 次請求與 13,000 GB-s；一次同步遠低於這個額度。這固定的是執行機房。同一機房仍可能有多個出口 IP，因此不能保證銀行永遠不要求簡訊。
 - 人工驗證碼的待登入 session 只保存於 `encrypted_config`，兩分鐘到期，成功或失敗後清除；排程同步使用 Workers AI 辨識。`sync_cursor` 只含同步時間。
 - 登入回應的 `resultType` 與官方網銀前端相同：`0` 成功、`1` 重複登入、`3` 提示綁定裝置、`6` 已有兩台裝置、`7` 已綁定等；`3` 不影響查詢權限，連接器不做裝置綁定。`isTrustUser` 是信託戶旗標，與裝置信任無關。
 - 登入後 `secondFactorFlag=Y` 為雙重驗證，連接器不支援，登出並中止；其餘先查詢帳務，即使 `isHighIpFar=true`（異地登入旗標）也不預先要求簡訊。只有存款或信用卡查詢實際回 `SYS014`「權限不足」，且登入回應帶有異地旗標時，才進入既有簡訊驗證流程；以結構化銀行回應碼判斷，不比對錯誤文字。存款或信用卡等必要查詢失敗時，不回傳部分帳務；貸款查詢依下方的附加資料政策處理。
 - 查詢權限不足後的異地驗證只在手動同步處理：以 `megapmb` 呼叫 `/fco/fco00001/getverifycode`（`type=sms`）請銀行寄簡訊，回應的 `checkCode`（簡訊檢核碼）放入 `MEGABANK_SMS_OTP_REQUIRED` 訊息供使用者對照；已登入的工作階段以 `authenticated=true` 序列化後寫回 `encrypted_config` 的 `pendingSession`，三分鐘到期、只供這一次驗證使用。使用者送出 `otp` 後呼叫 `/fco/fco00001/validatecode`，`success=true` 才接續同一個登入重新查詢完整帳務並登出；`success=false` 回 `MEGABANK_OTP_INVALID` 並保留工作階段讓使用者重輸；非 `0000` 代碼、逾時或其他錯誤一律登出並清除狀態。排程同步同樣先查詢，只有查詢權限不足且帶有異地旗標時才登出、標記需要使用者處理，不觸發簡訊。
 - 新一輪同步若發現上一輪等待驗證碼的已登入工作階段仍在設定中，會先盡力登出再重新登入。
-- 虛擬裝置識別（`deviceCode`、`deviceUKey`、`deviceSeed`）在第一次人工取得驗證碼時產生並寫入 `encrypted_config`，自動辨識路徑進入簡訊驗證時也會保存，之後的驗證碼 session 與登入都沿用同一組；它不等於 App 的「綁定裝置」（登入回應 `resultType=3` 的提示），不保證之後的登入免簡訊。過去實測驗證後約 15 分鐘內再登入不需簡訊、約一小時後同一個虛擬裝置仍需要驗證，這是當時觀察，不是固定有效期限或銀行政策。帳密變更時依 `resetOnCredentialChangeFields` 重設。它只是裝置識別，不含 cookie 或 token，不屬於重用銀行 session。
+- 虛擬裝置識別（`deviceCode`、`deviceUKey`、`deviceSeed`）在首次人工取得驗證碼或 AI 自動同步時產生，於向銀行建立連線前以設定版本 CAS 寫入 `encrypted_config`；初始化、OCR、登入或查詢失敗也保留。接續既有 CAPTCHA／OTP 時保存該工作階段實際使用的識別；成功或失敗的清理只移除短暫驗證欄位，之後登入沿用同一組，帳密變更才依 `resetOnCredentialChangeFields` 重設。它只是裝置識別，不含 cookie 或 token，不屬於重用銀行 session，也不等於 App 正式綁定或保證免簡訊。過去實測驗證後約 15 分鐘內再登入不需簡訊、約一小時後同一個虛擬裝置仍需要驗證，這是當時觀察，不是固定有效期限或銀行政策。
+- 異地簡訊 `validatecode` 只驗證當次工作階段，沒有取得可跨次登入沿用的銀行授權。App 的正式裝置綁定是另一套流程，且每位客戶只能綁定一支行動裝置，綁定會取代使用者手機上的快速登入與行動安全碼；連接器不實作正式綁定或解除其他裝置，仍送 `isDeviceBinded=false`。
+- 去識別的結構化診斷由 `sync.ts` 提供 `attemptId`、手動／排程 `trigger`、驗證碼／同步 `flow` 與 App 宣告版本：`megabank_device_state` 只記錄識別來源、保存結果及三個識別組成的 SHA-256 前 16 位指紋；`megabank_login_result` 記錄回應碼、已知 `resultType`、異地及雙重驗證旗標；`megabank_sms_gate` 記錄觸發簡訊的查詢端點與處置。未知旗標標記 `unknown`／`null`，不輸出原始回應、裝置識別、帳密、cookie、token、OTP、CAPTCHA 或帳務。
 - 登入後無論同步成功或失敗，都依 App 流程呼叫 `/fco/fco02011/logout` 釋放銀行工作階段；登出失敗不覆蓋同步結果或原始錯誤。
-- 查詢回 `SYS014` 但沒有異地旗標，或完成簡訊後查詢仍回 `SYS014` 時，保留原本的查詢錯誤與先登出網銀再試的提示，不再寄簡訊；其他查詢錯誤也原樣中止。連接器不自動接管其他登入。
+- 查詢回 `SYS014` 但沒有異地旗標，或完成簡訊後查詢仍回 `SYS014` 時，提示查詢權限不足與確認官方登入狀態，不將原因直接歸咎於其他登入，也不再寄簡訊；其他查詢錯誤原樣中止。連接器不自動接管其他登入。
 - 驗證碼準備及同步後的設定寫入會比對當初讀取的加密設定；promotion batch 也先檢查同一版本，期間若憑證已更新，不寫入舊帳務、舊憑證或同步游標。
 - 兆豐同步工作建立時停用；首次成功同步後會比照永豐、台新與王道自動啟用。若使用者之後手動停用，再次手動同步不會重新啟用。
 - 存款清單取 `/fco/fco10001/home`；臺幣交易按帳戶查 `/fao/fao01001/query`，最多回溯三個月並處理 `tsqName` 分頁。外幣帳戶與餘額會同步，不查詢外幣交易。

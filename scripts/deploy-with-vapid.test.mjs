@@ -1,10 +1,304 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
+import { parseEnv, promisify } from "node:util";
+import { DatabaseSync } from "node:sqlite";
+import { deploy } from "./deploy-with-vapid.mjs";
+
+const vapidSecrets = {
+  VAPID_PUBLIC_KEY: "synthetic-existing-public",
+  VAPID_PRIVATE_KEY: "synthetic-existing-private",
+};
+
+function deploymentRunner({
+  initialSecrets = { CONFIG_ENCRYPTION_KEY: "auto" },
+  inspectData = () => 0,
+  databaseResult,
+  failDeployment = false,
+} = {}) {
+  const runtimeSecrets = { ...initialSecrets };
+  const calls = [];
+  const uploads = [];
+  const run = async (args) => {
+    calls.push(args);
+    if (args[0] === "secret") {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify(
+          Object.keys(runtimeSecrets).map((name) => ({ name })),
+        ),
+        stderr: "",
+      };
+    }
+    if (args[0] === "d1") {
+      const query = args[args.indexOf("--command") + 1];
+      return (
+        databaseResult ?? {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              success: true,
+              results: [{ has_encrypted_data: inspectData(query) }],
+            },
+          ]),
+          stderr: "",
+        }
+      );
+    }
+    assert.equal(args[0], "deploy");
+    const file = args.includes("--secrets-file")
+      ? args[args.indexOf("--secrets-file") + 1]
+      : null;
+    const content = file ? await readFile(file, "utf8") : null;
+    const secrets = content
+      ? file.endsWith(".json")
+        ? JSON.parse(content)
+        : parseEnv(content)
+      : {};
+    if (file) assert.equal((await stat(file)).mode & 0o777, 0o600);
+    uploads.push({ file, secrets });
+    if (failDeployment) return { exitCode: 2 };
+    Object.assign(runtimeSecrets, secrets);
+    return { exitCode: 0 };
+  };
+  return {
+    run,
+    calls,
+    uploads,
+    runtimeSecrets,
+    options: {
+      run,
+      environment: {},
+      readConfig: async () => ({ name: "all-set-tw", vars: {} }),
+    },
+  };
+}
+
+test("first auto deployment creates a private random key and later updates preserve it", async (t) => {
+  const logs = [];
+  t.mock.method(console, "log", (...args) => logs.push(args.join(" ")));
+  const runner = deploymentRunner({
+    initialSecrets: { CONFIG_ENCRYPTION_KEY: "auto", ...vapidSecrets },
+  });
+  const args = ["--config", "wrangler.private.toml", "--env", "production"];
+  assert.equal(await deploy(args, runner.options), 0);
+  const key = runner.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY;
+  assert.match(key, /^[0-9a-f]{64}$/);
+  assert.deepEqual(runner.uploads[0].secrets, {
+    GENERATED_CONFIG_ENCRYPTION_KEY: key,
+  });
+  assert.equal(runner.runtimeSecrets.CONFIG_ENCRYPTION_KEY, "auto");
+  assert.equal(
+    runner.runtimeSecrets.VAPID_PRIVATE_KEY,
+    vapidSecrets.VAPID_PRIVATE_KEY,
+  );
+  const d1Call = runner.calls.find((call) => call[0] === "d1");
+  assert.deepEqual(d1Call.slice(0, 6), [
+    "d1",
+    "execute",
+    "DB",
+    "--remote",
+    "--json",
+    "--command",
+  ]);
+  assert.deepEqual(d1Call.slice(7), args);
+  assert.equal(await deploy(args, runner.options), 0);
+  assert.equal(runner.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY, key);
+  assert.deepEqual(runner.uploads[1].secrets, {});
+  assert.equal(runner.calls.filter((call) => call[0] === "d1").length, 1);
+  assert.ok(logs.every((line) => !line.includes(key)));
+  assert.ok(runner.calls.every((call) => !call.includes(key)));
+  await assert.rejects(readFile(runner.uploads[0].file), { code: "ENOENT" });
+
+  const otherWorker = deploymentRunner();
+  assert.equal(await deploy([], otherWorker.options), 0);
+  assert.notEqual(
+    otherWorker.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY,
+    key,
+  );
+});
+
+test("initialization preserves manual and auto secrets supplied as JSON or dotenv", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "encryption-secret-test-"));
+  try {
+    for (const format of ["json", "env"]) {
+      for (const mode of ["auto", "manual"]) {
+        await t.test(`${format}: ${mode}`, async () => {
+          const values = {
+            CONFIG_ENCRYPTION_KEY:
+              mode === "auto" ? "auto" : "synthetic manual key $() `literal`",
+            EXTRA_SECRET: "synthetic extra value",
+          };
+          const content =
+            format === "json"
+              ? JSON.stringify(values)
+              : `# Private user settings\nCONFIG_ENCRYPTION_KEY='${values.CONFIG_ENCRYPTION_KEY}'\nEXTRA_SECRET='${values.EXTRA_SECRET}'\n`;
+          const file = join(directory, `supplied-${mode}.${format}`);
+          await writeFile(file, content, { mode: 0o600 });
+          const runner = deploymentRunner();
+          assert.equal(
+            await deploy(["--secrets-file", file], runner.options),
+            0,
+          );
+          for (const [name, value] of Object.entries(values)) {
+            assert.equal(runner.runtimeSecrets[name], value);
+          }
+          assert.equal(await readFile(file, "utf8"), content);
+          if (mode === "auto") {
+            assert.match(
+              runner.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY,
+              /^[0-9a-f]{64}$/,
+            );
+          } else {
+            assert.equal(
+              runner.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY,
+              undefined,
+            );
+            assert.equal(
+              runner.calls.some((call) => call[0] === "d1"),
+              false,
+            );
+          }
+          await assert.rejects(readFile(runner.uploads[0].file), {
+            code: "ENOENT",
+          });
+        });
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("existing encrypted D1 data blocks key replacement while legacy manual updates remain usable", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const db = new DatabaseSync(":memory:");
+  const directory = await mkdtemp(join(tmpdir(), "existing-encryption-test-"));
+  const migrationsDirectory = new URL(
+    "../apps/worker/migrations/",
+    import.meta.url,
+  );
+  const autoFile = join(directory, "auto.json");
+  try {
+    for (const name of (await readdir(migrationsDirectory))
+      .filter((name) => name.endsWith(".sql"))
+      .sort()) {
+      db.exec(await readFile(new URL(name, migrationsDirectory), "utf8"));
+    }
+    await writeFile(
+      autoFile,
+      JSON.stringify({ CONFIG_ENCRYPTION_KEY: "auto" }),
+      { mode: 0o600 },
+    );
+    const cases = [
+      [
+        "connector settings",
+        "INSERT INTO connector_settings (id, connector_id, encrypted_config, created_at, updated_at) VALUES ('test', 'sinopac', 'encrypted', 't', 't')",
+      ],
+      [
+        "push subscription",
+        "INSERT INTO push_subscriptions (id, encrypted_subscription, created_at, updated_at) VALUES ('test', 'encrypted', 't', 't')",
+      ],
+      [
+        "TDCC config",
+        "INSERT INTO tdcc_sync_runs (id, trigger, encrypted_config, created_at, updated_at) VALUES ('test', 'manual', 'encrypted', 't', 't')",
+      ],
+      [
+        "TDCC session",
+        "INSERT INTO tdcc_sync_runs (id, trigger, encrypted_session, created_at, updated_at) VALUES ('test', 'manual', 'encrypted', 't', 't')",
+      ],
+    ];
+    for (const [name, insert] of cases) {
+      await t.test(name, async () => {
+        db.exec(
+          "DELETE FROM connector_settings; DELETE FROM push_subscriptions; DELETE FROM tdcc_sync_runs;",
+        );
+        db.exec(insert);
+        const options = {
+          initialSecrets: {
+            CONFIG_ENCRYPTION_KEY: "synthetic-legacy-key",
+            ...vapidSecrets,
+          },
+          inspectData: (query) => db.prepare(query).get().has_encrypted_data,
+        };
+        const runner = deploymentRunner(options);
+        assert.equal(await deploy([], runner.options), 0);
+        assert.deepEqual(runner.runtimeSecrets, options.initialSecrets);
+        assert.deepEqual(runner.uploads[0].secrets, {});
+
+        const explicitAuto = deploymentRunner(options);
+        await assert.rejects(
+          deploy(["--secrets-file", autoFile], explicitAuto.options),
+          /Refusing to generate a replacement/,
+        );
+        assert.equal(explicitAuto.uploads.length, 0);
+
+        const missingPrimary = deploymentRunner({
+          ...options,
+          initialSecrets: vapidSecrets,
+        });
+        await assert.rejects(
+          deploy([], missingPrimary.options),
+          /Refusing to generate a replacement/,
+        );
+        assert.equal(missingPrimary.uploads.length, 0);
+      });
+    }
+    db.exec(
+      "DELETE FROM connector_settings; DELETE FROM push_subscriptions; DELETE FROM tdcc_sync_runs;",
+    );
+    db.exec(
+      `INSERT INTO tdcc_sync_runs (id, trigger, session_json, created_at, updated_at) VALUES ('test', 'manual', '{"legacy":true}', 't', 't')`,
+    );
+    const fresh = deploymentRunner({
+      inspectData: (query) => db.prepare(query).get().has_encrypted_data,
+    });
+    assert.equal(await deploy([], fresh.options), 0);
+    assert.match(
+      fresh.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY,
+      /^[0-9a-f]{64}$/,
+    );
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed D1 inspection refuses initialization without exposing CLI output", async () => {
+  const runner = deploymentRunner({
+    databaseResult: {
+      exitCode: 1,
+      stdout: "synthetic-sensitive-response",
+      stderr: "synthetic-sensitive-token",
+    },
+  });
+  await assert.rejects(deploy([], runner.options), (error) => {
+    assert.match(error.message, /Unable to inspect encrypted D1 data/);
+    assert.doesNotMatch(error.message, /synthetic-sensitive/);
+    return true;
+  });
+  assert.equal(runner.uploads.length, 0);
+});
+
+test("failed upload removes the temporary generated secrets file", async () => {
+  const runner = deploymentRunner({ failDeployment: true });
+  assert.equal(await deploy([], runner.options), 2);
+  await assert.rejects(readFile(runner.uploads[0].file), { code: "ENOENT" });
+  assert.equal(
+    runner.runtimeSecrets.GENERATED_CONFIG_ENCRYPTION_KEY,
+    undefined,
+  );
+});
 
 test("Cloudflare build token reaches resource preparation, migrations and deployment without printing the token", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cloudflare-build-auth-"));

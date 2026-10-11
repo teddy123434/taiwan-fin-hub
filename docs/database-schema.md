@@ -11,7 +11,7 @@
 - Tables：31
 - Explicit indexes：44
 - Other objects：0
-- Migrations：51
+- Migrations：52
 
 ## Tables
 
@@ -43,8 +43,8 @@
 | [`sync_activity_changes`](#sync_activity_changes) | 與金融資料 promotion 同一 transaction 保存的新增紀錄與入帳事件。 | 5 | 1 | 0 |
 | [`sync_activity_details`](#sync_activity_details) | 報告完成時沿用活動配對規則產生的活動展示快照。 | 3 | 1 | 0 |
 | [`sync_activity_runs`](#sync_activity_runs) | 同步執行與排程報告的明確關聯，涵蓋原始同步及成功的手動補救。 | 7 | 1 | 1 |
-| [`sync_jobs`](#sync_jobs) | 每個連接器與同步範圍的排程、鎖定狀態與最近執行結果。 | 19 | 0 | 1 |
-| [`sync_schedule_settings`](#sync_schedule_settings) | 所有使用 inherit 模式之同步工作的全域預設排程。 | 6 | 0 | 0 |
+| [`sync_jobs`](#sync_jobs) | 每個連接器與同步範圍的排程、鎖定狀態與最近執行結果。 | 20 | 0 | 1 |
+| [`sync_schedule_settings`](#sync_schedule_settings) | 所有使用 inherit 模式之同步工作的全域預設排程。 | 7 | 0 | 0 |
 | [`sync_write_staging`](#sync_write_staging) | 同步流程寫入正式資料表前的暫存資料。 | 5 | 0 | 1 |
 | [`tdcc_sync_run_items`](#tdcc_sync_run_items) | 集保持久化同步中，依帳戶、任務與分頁拆分的工作及取得結果。 | 18 | 1 | 2 |
 | [`tdcc_sync_runs`](#tdcc_sync_runs) | 集保 e 存摺跨 Queue invocation 執行的持久化同步記錄與接續狀態。 | 25 | 2 | 2 |
@@ -1361,7 +1361,8 @@ CREATE TABLE sync_activity_runs (
 | 16 | `updated_at` | 同步工作最後更新的時間。 | TEXT | NO | — | — | — |
 | 17 | `schedule_mode` | 排程模式；inherit 使用全域設定，custom 使用工作自己的設定。 | TEXT | NO | 'inherit' | — | — |
 | 18 | `preferred_time` | 每日或每週排程偏好的台北時間。 | TEXT | NO | '06:00' | — | — |
-| 19 | `preferred_weekday` | 每週排程的星期，0 代表週日、6 代表週六。 | INTEGER | NO | 1 | — | — |
+| 19 | `preferred_weekday` | 每週排程的單日相容欄位，0 代表週日、6 代表週六；有星期清單時保存清單第一天。 | INTEGER | NO | 1 | — | — |
+| 20 | `preferred_weekdays` | 每週執行日的 JSON 陣列，0 代表週日、6 代表週六；NULL 沿用 preferred_weekday 單日設定。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -1394,7 +1395,7 @@ CREATE TABLE "sync_jobs" (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL, schedule_mode TEXT NOT NULL DEFAULT 'inherit'
   CHECK (schedule_mode IN ('inherit', 'custom')), preferred_time TEXT NOT NULL DEFAULT '06:00', preferred_weekday INTEGER NOT NULL DEFAULT 1
-  CHECK (preferred_weekday BETWEEN 0 AND 6),
+  CHECK (preferred_weekday BETWEEN 0 AND 6), preferred_weekdays TEXT,
   UNIQUE (connector_id, scope)
 )
 ```
@@ -1413,7 +1414,8 @@ CREATE TABLE "sync_jobs" (
 | 3 | `preferred_time` | 預設每日或每週執行時間，使用台北時間。 | TEXT | NO | — | — | — |
 | 4 | `timezone` | 排程使用的時區，目前為 Asia/Taipei。 | TEXT | NO | — | — | — |
 | 5 | `updated_at` | 全域排程最後更新的時間。 | TEXT | NO | — | — | — |
-| 6 | `preferred_weekday` | 每週排程的預設星期，0 代表週日、6 代表週六。 | INTEGER | NO | 1 | — | — |
+| 6 | `preferred_weekday` | 每週排程的預設單日相容欄位，0 代表週日、6 代表週六；有星期清單時保存清單第一天。 | INTEGER | NO | 1 | — | — |
+| 7 | `preferred_weekdays` | 每週預設執行日的 JSON 陣列，0 代表週日、6 代表週六；NULL 沿用 preferred_weekday 單日設定。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -1433,7 +1435,7 @@ CREATE TABLE "sync_schedule_settings" (
   timezone TEXT NOT NULL,
   updated_at TEXT NOT NULL
 , preferred_weekday INTEGER NOT NULL DEFAULT 1
-  CHECK (preferred_weekday BETWEEN 0 AND 6))
+  CHECK (preferred_weekday BETWEEN 0 AND 6), preferred_weekdays TEXT)
 ```
 
 ### `sync_write_staging`
@@ -1693,6 +1695,7 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0051_rakuten_sync_job.sql`](../apps/worker/migrations/0051_rakuten_sync_job.sql)
 - [`0052_bank_loan_overview.sql`](../apps/worker/migrations/0052_bank_loan_overview.sql)
 - [`0053_scheduled_sync_loan_debt.sql`](../apps/worker/migrations/0053_scheduled_sync_loan_debt.sql)
+- [`0054_weekly_sync_days.sql`](../apps/worker/migrations/0054_weekly_sync_days.sql)
 
 ## 程式碼導覽
 

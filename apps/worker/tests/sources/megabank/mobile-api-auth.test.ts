@@ -5,6 +5,7 @@ import {
   MegabankOtpRequiredError,
   MegabankProtocolError,
   MegabankVerificationRequiredError,
+  type MegabankDiagnostic,
 } from "../../../src/sources/megabank/mobile-api";
 
 const device = {
@@ -36,6 +37,7 @@ function bankApi(
   options: {
     highIpFar?: boolean;
     secondFactorFlag?: string;
+    loginExtras?: Record<string, unknown>;
     queryError?: { resource: string; code: string };
   } = {},
 ) {
@@ -57,6 +59,8 @@ function bankApi(
       cipherToken: JSON.stringify(cipherToken),
     },
     [LOGIN]: {
+      ...options.loginExtras,
+      resultType: "3",
       isHighIpFar: options.highIpFar ?? true,
       secondFactorFlag: options.secondFactorFlag ?? "N",
     },
@@ -225,7 +229,7 @@ describe("兆豐查詢權限與簡訊驗證", () => {
         .catch((error: unknown) => error);
 
       expect(error).toBeInstanceOf(MegabankProtocolError);
-      expect(error).toMatchObject({ code });
+      expect(error).toMatchObject({ code, resource: DEPOSITS });
       expect(api.resources()).not.toContain(REQUEST_OTP);
       expect(api.resources()).toContain(LOGOUT);
     },
@@ -245,5 +249,103 @@ describe("兆豐查詢權限與簡訊驗證", () => {
     expect(api.resources()).not.toContain(DEPOSITS);
     expect(api.resources()).not.toContain(REQUEST_OTP);
     expect(api.resources()).toContain(LOGOUT);
+  });
+
+  it("診斷記下登入旗標與觸發簡訊的端點，不含裝置、憑證或原始回應", async () => {
+    const api = bankApi({
+      queryError: { resource: TRANSACTIONS, code: "SYS014" },
+      loginExtras: {
+        userName: "synthetic-private-name",
+        cookie: "synthetic-cookie",
+        token: "synthetic-response-token",
+      },
+    });
+    const diagnostics: MegabankDiagnostic[] = [];
+    const saveDevice = vi.fn(async () => undefined);
+    const connector = createMegabankConnector(
+      api.fetcher,
+      async () => "12345",
+      {
+        allowOtpRequest: true,
+        onDevice: saveDevice,
+        onDiagnostic: (event) => diagnostics.push(event),
+      },
+    );
+    const error: unknown = await connector
+      .sync(config)
+      .catch((error: unknown) => error);
+    if (!(error instanceof MegabankOtpRequiredError)) throw error;
+    await connector.sync({
+      ...config,
+      pendingSession: error.pendingSession,
+      pendingSessionExpiresAt: error.pendingSessionExpiresAt,
+      otp: "654321",
+    });
+
+    expect(saveDevice.mock.calls).toEqual([
+      [device, "stored"],
+      [device, "pending_session"],
+    ]);
+    expect(diagnostics).toContainEqual({
+      event: "megabank_login_result",
+      code: "0000",
+      resultType: "3",
+      highIpFar: true,
+      secondFactorFlag: "N",
+    });
+    expect(diagnostics).toContainEqual({
+      event: "megabank_sms_gate",
+      resource: TRANSACTIONS,
+      code: "SYS014",
+      action: "request_sms",
+    });
+    const logged = JSON.stringify(diagnostics);
+    for (const secret of [
+      ...Object.values(device),
+      ...Object.values(config),
+      "synthetic-private-name",
+      "synthetic-cookie",
+      "synthetic-response-token",
+      "synthetic-token",
+      "12345",
+      "654321",
+    ]) {
+      expect(logged).not.toContain(secret);
+    }
+  });
+
+  it("首次 OCR 失敗前已交付裝置保存，重試沿用該裝置", async () => {
+    const api = bankApi();
+    let savedDevice: typeof device | undefined;
+    const connector = createMegabankConnector(
+      api.fetcher,
+      async () => {
+        throw new MegabankVerificationRequiredError("synthetic OCR failure");
+      },
+      {
+        onDevice: async (identity) => {
+          savedDevice = identity;
+        },
+      },
+    );
+    const {
+      deviceCode: _code,
+      deviceUKey: _key,
+      deviceSeed: _seed,
+      ...credentials
+    } = config;
+    await expect(connector.sync(credentials)).rejects.toThrow(
+      "synthetic OCR failure",
+    );
+    expect(savedDevice).toBeDefined();
+    expect(api.resources()).not.toContain(LOGIN);
+    const result = await createMegabankConnector(
+      api.fetcher,
+      async () => "12345",
+    ).sync({ ...credentials, ...savedDevice });
+    expect(result.bankAccounts).toHaveLength(1);
+    expect(new Set(api.requests.map((request) => request.deviceIxd))).toEqual(
+      new Set([savedDevice!.deviceCode]),
+    );
   });
 });

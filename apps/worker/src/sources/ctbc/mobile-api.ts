@@ -8,6 +8,7 @@ import { isNoCreditCardMessage } from "../credit-card-status";
 const CTBC_IMP_ORIGIN = "https://eb.ctbcbank.com/IMP";
 const CTBC_APPLICATION = "EBMW_Adapter";
 const CTBC_RESOURCE_ENDPOINT = `${CTBC_IMP_ORIGIN}/api/adapters/${CTBC_APPLICATION}/resource/ebmwResource`;
+// Google Play Taiwan latest version, verified on 2026-10-10.
 const CTBC_APP_VERSION = "5.2.26";
 const CTBC_WEB_VERSION = "20260722182433427";
 // MobileFirst client-credential value shipped in the public Android package.
@@ -209,6 +210,9 @@ class CtbcMobileSession {
   private transactionToken = "mfpInit";
   private seed = "";
   private loggedIn = false;
+  private httpStatus: number | null = null;
+  private loginAttempt = 0;
+  private loginConfirmationType: "initial" | "device" | "duplicate" = "initial";
 
   constructor(private readonly fetcher: CtbcFetch) {}
 
@@ -285,8 +289,10 @@ class CtbcMobileSession {
       ).trim();
       if (deviceTimestamp) {
         loginRequest.deviceBindBlackListCheckTimestamp = deviceTimestamp;
+        this.loginConfirmationType = "device";
       } else if (duplicateTimestamp) {
         loginRequest.dupLoginCheckTimestamp = duplicateTimestamp;
+        this.loginConfirmationType = "duplicate";
       } else {
         break;
       }
@@ -303,7 +309,7 @@ class CtbcMobileSession {
       console.warn(
         JSON.stringify({
           event: "ctbc_login_verification_required",
-          flags: verificationFlagNames(data),
+          ...this.loginDiagnostics(response),
         }),
       );
       throw new CtbcVerificationRequiredError(
@@ -325,6 +331,7 @@ class CtbcMobileSession {
   }
 
   async resource(resource: string, rqData: JsonRecord) {
+    if (resource === LOGIN_RESOURCE) this.loginAttempt += 1;
     const body = this.envelope(rqData, resource);
     const headers: Record<string, string> = {};
     if (this.transactionToken === "mfpInit") {
@@ -401,6 +408,7 @@ class CtbcMobileSession {
         body,
         signal: controller.signal,
       });
+      this.httpStatus = response.status;
       if (!response.ok) {
         console.warn(
           JSON.stringify({
@@ -483,6 +491,7 @@ class CtbcMobileSession {
         system,
         code,
         statusCode,
+        ...(isLogin ? this.loginDiagnostics(response) : {}),
       }),
     );
     if (isVerificationResponse(response)) {
@@ -491,6 +500,38 @@ class CtbcMobileSession {
       );
     }
     throw new CtbcConnectionError("中國信託資料同步暫時無法完成。");
+  }
+
+  private loginDiagnostics(response: JsonRecord) {
+    const data = responseData(response);
+    const desc = typeof response.desc === "string" ? response.desc : "";
+    return {
+      httpStatus: this.httpStatus,
+      loginAttempt: this.loginAttempt,
+      confirmationType: this.loginConfirmationType,
+      appVer: CTBC_APP_VERSION,
+      webVer: CTBC_WEB_VERSION,
+      statusCodeType:
+        response.statusCode === undefined
+          ? "missing"
+          : response.statusCode === null
+            ? "null"
+            : typeof response.statusCode,
+      descCategory: !hasText(desc)
+        ? "missing"
+        : /更新至最新版本/.test(desc)
+          ? "app_update_prompt"
+          : "other",
+      hasRsData: isRecord(response.rsData),
+      verificationFlags: {
+        deviceConfirmation: hasText(data.deviceBindBlackListCheckTimestamp),
+        duplicateLoginConfirmation: hasText(data.dupLoginCheckTimestamp),
+        bindDevice: containsVerificationFlag(data, /binddevice/i),
+        otp: containsVerificationFlag(data, /otp/i),
+        twoStage: containsVerificationFlag(data, /twostage/i),
+        verificationRequired: isVerificationResponse(response),
+      },
+    };
   }
 }
 
@@ -754,31 +795,15 @@ function responseData(response: JsonRecord) {
   return recordValue(response.rsData);
 }
 
-function containsVerificationFlag(data: JsonRecord) {
+function containsVerificationFlag(data: JsonRecord, namePattern?: RegExp) {
   return Object.entries(data).some(
     ([key, value]) =>
       isVerificationFlagKey(key) &&
+      (!namePattern || namePattern.test(key)) &&
       (value === true ||
         value === 1 ||
         /^(?:y|yes|required|pending|true|1)$/i.test(stringValue(value).trim())),
   );
-}
-
-function verificationFlagNames(data: JsonRecord) {
-  const known = [
-    "needBindDevice",
-    "dupLoginCheckTimestamp",
-    "deviceBindBlackListCheckTimestamp",
-  ].filter((key) => data[key] === true || hasText(data[key]));
-  const dynamic = Object.entries(data).flatMap(([key, value]) =>
-    isVerificationFlagKey(key) &&
-    (value === true ||
-      value === 1 ||
-      /^(?:y|yes|required|pending|true|1)$/i.test(stringValue(value).trim()))
-      ? [key]
-      : [],
-  );
-  return Array.from(new Set([...known, ...dynamic])).sort();
 }
 
 function isVerificationFlagKey(key: string) {

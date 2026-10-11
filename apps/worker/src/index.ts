@@ -24,6 +24,8 @@ import type { Env, ScheduledSyncQueueMessage } from "./platform/env";
 import { honoFactory } from "./platform/hono";
 import { apiErrorResponse, demoReadOnlyMiddleware } from "./platform/http";
 
+export { MegabankEgress } from "./platform/megabank-egress-object";
+
 export const app = honoFactory.createApp();
 export const api = honoFactory.createApp();
 

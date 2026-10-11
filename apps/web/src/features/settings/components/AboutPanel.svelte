@@ -7,7 +7,12 @@
   import Textarea from "@/shared/ui/Textarea.svelte";
 
   const buildInfo = __BUILD_INFO__;
-  const buildTime = `${buildInfo.builtAt.slice(0, 19).replace("T", " ")} UTC`;
+  const buildTime = `${new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    dateStyle: "short",
+    timeStyle: "medium",
+    hourCycle: "h23",
+  }).format(new Date(buildInfo.builtAt))} UTC+8`;
   const details = [
     {
       label: "Commit",

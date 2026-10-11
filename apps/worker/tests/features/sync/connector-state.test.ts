@@ -33,6 +33,9 @@ describe("connector state boundaries", () => {
           pendingSessionExpiresAt: "2026-09-25T08:02:00.000Z",
           captcha: "12345",
           otp: "654321",
+          deviceCode: "synthetic-device-code",
+          deviceUKey: "synthetic-device-key",
+          deviceSeed: "synthetic-device-seed",
           syncedAt: "2026-09-25T08:01:00.000Z",
         }),
       ),
@@ -43,11 +46,17 @@ describe("connector state boundaries", () => {
         pendingSessionExpiresAt: "2026-09-25T08:02:00.000Z",
         captcha: "12345",
         otp: "654321",
+        deviceCode: "synthetic-device-code",
+        deviceUKey: "synthetic-device-key",
+        deviceSeed: "synthetic-device-seed",
       },
     });
     expect(
       serializePublicConnectorConfig("megabank", {
         pendingSession: "synthetic-token",
+        deviceCode: "synthetic-device-code",
+        deviceUKey: "synthetic-device-key",
+        deviceSeed: "synthetic-device-seed",
       }),
     ).toBeNull();
   });

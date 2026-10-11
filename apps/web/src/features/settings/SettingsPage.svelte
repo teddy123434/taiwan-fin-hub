@@ -27,6 +27,7 @@
   import NotificationPanel from "./components/NotificationPanel.svelte";
   import SourceCard from "./components/SourceCard.svelte";
   import ConnectorPanel from "./connectors/ConnectorPanel.svelte";
+  import { formatScheduleWeekdays } from "./model/schedule";
   let {
     api,
     demoMode,
@@ -41,15 +42,6 @@
     navigate: (view: View) => void;
   } = $props();
   const sources = connectorDefinitions;
-  const weekdayLabels = [
-    "週日",
-    "週一",
-    "週二",
-    "週三",
-    "週四",
-    "週五",
-    "週六",
-  ];
   const settingTabs = [
     { view: "settings" as const, label: "總覽" },
     { view: "data-sources" as const, label: "資料來源" },
@@ -105,7 +97,7 @@
       : inheritedJob.intervalMinutes === 1440
         ? `每天 ${inheritedJob.preferredTime}`
         : inheritedJob.intervalMinutes === 10080
-          ? `每${weekdayLabels[inheritedJob.preferredWeekday] ?? "週一"} ${inheritedJob.preferredTime}`
+          ? `${formatScheduleWeekdays(inheritedJob.preferredWeekdays)} ${inheritedJob.preferredTime}`
           : `每 ${inheritedJob.intervalMinutes / 60} 小時`,
   );
   const ratesSummary = $derived(

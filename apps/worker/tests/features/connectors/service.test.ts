@@ -26,7 +26,11 @@ describe("連線設定的憑證安全（隔離 D1）", () => {
 
   // Zod 3 接受所有 8-4-4-4-12 十六進位裝置識別碼；升級不得拒絕既有設定。
   it("更新新光設定時保留舊版可接受的裝置識別碼與加密憑證", async () => {
-    const env = { DB: harness.binding, CONFIG_ENCRYPTION_KEY: key } as Env;
+    const env = {
+      DB: harness.binding,
+      CONFIG_ENCRYPTION_KEY: key,
+      GENERATED_CONFIG_ENCRYPTION_KEY: "synthetic-unused-generated-key",
+    } as Env;
     const config = {
       nationalId: credentials.userId,
       alias: credentials.account,
@@ -42,6 +46,59 @@ describe("連線設定的憑證安全（隔離 D1）", () => {
     expect(
       JSON.stringify(await getConnectorSettingsView(env, "skbank")),
     ).not.toContain(config.deviceId);
+  });
+
+  it("auto 使用已保存的隨機金鑰，重新部署後仍可讀取既有設定", async () => {
+    const generatedKey = "a".repeat(64);
+    const env = {
+      DB: harness.binding,
+      CONFIG_ENCRYPTION_KEY: "auto",
+      GENERATED_CONFIG_ENCRYPTION_KEY: generatedKey,
+    } as Env;
+    await updateConnectorSettings(env, "taishin", credentials);
+    const stored = await getConnectorSettings(env.DB, "taishin");
+    expect(await decryptJson(stored!.encrypted_config, generatedKey)).toEqual(
+      credentials,
+    );
+    await expect(
+      decryptJson(stored!.encrypted_config, "auto"),
+    ).rejects.toThrow();
+
+    await updateConnectorSettings({ ...env }, "taishin", {});
+    expect(await getConnectorSettingsView({ ...env }, "taishin")).toMatchObject(
+      {
+        configured: true,
+        credentialsComplete: true,
+      },
+    );
+    expect(
+      JSON.stringify(await getConnectorSettingsView(env, "taishin")),
+    ).not.toContain(generatedKey);
+  });
+
+  it("auto 缺少真正金鑰時拒絕寫入，也不把 auto 本身當成金鑰", async () => {
+    const env = { DB: harness.binding, CONFIG_ENCRYPTION_KEY: "auto" } as Env;
+    for (const generatedKey of [undefined, "auto"]) {
+      await expect(
+        updateConnectorSettings(
+          { ...env, GENERATED_CONFIG_ENCRYPTION_KEY: generatedKey },
+          "esun",
+          credentials,
+        ),
+      ).rejects.toThrow(/requires GENERATED_CONFIG_ENCRYPTION_KEY/);
+    }
+    expect(await getConnectorSettings(env.DB, "esun")).toBeNull();
+  });
+
+  it("主金鑰設定遺失時不自動切換到 generated 金鑰", async () => {
+    const env = {
+      DB: harness.binding,
+      GENERATED_CONFIG_ENCRYPTION_KEY: "synthetic-generated-key",
+    } as Env;
+    await expect(
+      updateConnectorSettings(env, "esun", credentials),
+    ).rejects.toThrow(/CONFIG_ENCRYPTION_KEY is required/);
+    expect(await getConnectorSettings(env.DB, "esun")).toBeNull();
   });
 
   it("加密儲存且公開 view 不洩漏秘密，變更帳密後移除舊 session 與 cursor", async () => {

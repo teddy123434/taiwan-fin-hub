@@ -7,6 +7,14 @@ assets = { directory = "../web/dist", binding = "ASSETS" }
 browser = { binding = "BROWSER" }
 ai = { binding = "AI", remote = true }
 
+[[durable_objects.bindings]]
+name = "MEGABANK_EGRESS"
+class_name = "MegabankEgress"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MegabankEgress"]
+
 [[queues.producers]]
 binding = "SYNC_QUEUE"
 queue = "taiwan-fin-hub-sync"

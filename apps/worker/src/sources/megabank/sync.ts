@@ -18,8 +18,10 @@ import {
   serializePublicConfig,
 } from "../../features/sync/config";
 import { decryptJson, encryptJson } from "../../platform/crypto";
+import { createMegabankEgressFetcher } from "../../platform/megabank-egress";
 import { configEncryptionKey } from "../../platform/config";
-import { parseMegabankConfig } from "./protocol";
+import { parseMegabankConfig, type MegabankConfig } from "./protocol";
+import { appVersion, detailVersion } from "./app-settings";
 import { reconcileMegabankDeposits } from "./transaction-reconcile";
 import {
   parsePublicConnectorConfig,
@@ -32,6 +34,8 @@ import {
   MegabankOtpRequiredError,
   MegabankOtpInvalidError,
   MegabankProtocolError,
+  type MegabankDevice,
+  type MegabankDiagnostic,
 } from "./mobile-api";
 import {
   updateConnectorEncryptedConfigIfCurrent,
@@ -88,15 +92,27 @@ export async function prepareMegabankCaptchaSession(env: Env) {
         ...stored,
         ...parsePublicConnectorConfig(connectorId, settings.public_config),
       });
-      const prepared = await prepareMegabankCaptcha(config);
+      const tracking = trackMegabankState(
+        env,
+        stored,
+        config,
+        settings.encrypted_config,
+        "manual",
+        "captcha",
+      );
+      const prepared = await prepareMegabankCaptcha(
+        config,
+        createMegabankEgressFetcher(env.MEGABANK_EGRESS),
+        tracking,
+      );
       const saved = await updateConnectorEncryptedConfigIfCurrent(
         env.DB,
         connectorId,
-        settings.encrypted_config,
+        tracking.encryptedConfig,
         await encryptJson(
           {
             ...stored,
-            // 首次取得驗證碼時固定虛擬裝置，之後登入都沿用，但不保證免簡訊。
+            // 裝置已在向銀行請求前保存；這裡只追加短暫的驗證工作階段。
             ...prepared.device,
             pendingSession: prepared.pendingSession,
             pendingSessionExpiresAt: prepared.pendingSessionExpiresAt,
@@ -131,6 +147,86 @@ function megabankStoredConfigAfterSync(stored: Record<string, unknown>) {
   return cleaned;
 }
 
+/** 在任何銀行請求前加密保存實際裝置；指紋僅供跨次診斷，無法恢復登入。 */
+function trackMegabankState(
+  env: Env,
+  stored: Record<string, unknown>,
+  config: MegabankConfig,
+  encryptedConfig: string,
+  trigger: SyncTrigger,
+  flow: "captcha" | "sync",
+) {
+  const context = {
+    attemptId: crypto.randomUUID(),
+    trigger,
+    flow,
+    appVersion,
+    detailVersion,
+  };
+  const log = (diagnostic: object) => {
+    console.log(JSON.stringify({ ...context, ...diagnostic }));
+  };
+  const tracking = {
+    encryptedConfig,
+    onDiagnostic: (diagnostic: MegabankDiagnostic) => log(diagnostic),
+    async onDevice(
+      device: MegabankDevice,
+      source: "stored" | "generated" | "pending_session",
+    ) {
+      const changed =
+        stored.deviceCode !== device.deviceCode ||
+        stored.deviceUKey !== device.deviceUKey ||
+        stored.deviceSeed !== device.deviceSeed;
+      if (changed) {
+        const next = await encryptJson(
+          { ...stored, ...device },
+          configEncryptionKey(env),
+        );
+        const saved = await updateConnectorEncryptedConfigIfCurrent(
+          env.DB,
+          "megabank",
+          tracking.encryptedConfig,
+          next,
+        );
+        if (!saved) {
+          log({
+            event: "megabank_device_state",
+            source,
+            outcome: "settings_changed",
+          });
+          throw new NeedsUserActionError(
+            "兆豐銀行設定在同步期間已變更，請重新同步。",
+          );
+        }
+        tracking.encryptedConfig = next;
+        Object.assign(stored, device);
+      }
+      Object.assign(config, device);
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(
+          JSON.stringify([
+            device.deviceCode,
+            device.deviceUKey,
+            device.deviceSeed,
+          ]),
+        ),
+      );
+      const fingerprint = Array.from(new Uint8Array(digest))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("")
+        .slice(0, 16);
+      log({
+        event: "megabank_device_state",
+        source,
+        fingerprint,
+        outcome: changed ? "saved" : "reused",
+      });
+    },
+  };
+  return tracking;
+}
+
 export async function syncMegabank(
   env: Env,
   trigger: SyncTrigger,
@@ -148,12 +244,20 @@ export async function syncMegabank(
     ...parsePublicConnectorConfig(connectorId, settings.public_config),
     ...overrides,
   });
+  const tracking = trackMegabankState(
+    env,
+    stored,
+    config,
+    settings.encrypted_config,
+    trigger,
+    "sync",
+  );
   let result: Awaited<
     ReturnType<ReturnType<typeof createMegabankConnector>["sync"]>
   >;
   try {
     const connector = createMegabankConnector(
-      globalThis.fetch.bind(globalThis),
+      createMegabankEgressFetcher(env.MEGABANK_EGRESS),
       overrides.captcha || overrides.otp
         ? undefined
         : async (imageBytes, contentType) => {
@@ -173,7 +277,7 @@ export async function syncMegabank(
             }
           },
       // 只有使用者在場的手動同步才請銀行寄簡訊驗證碼，排程不觸發。
-      { allowOtpRequest: trigger === "manual" },
+      { ...tracking, allowOtpRequest: trigger === "manual" },
     );
     result = await connector.sync(config, settings.sync_cursor ?? undefined);
   } catch (error) {
@@ -181,10 +285,10 @@ export async function syncMegabank(
       error instanceof MegabankOtpRequiredError ||
       error instanceof MegabankOtpInvalidError;
     const cleaned = megabankStoredConfigAfterSync(stored);
-    await updateConnectorEncryptedConfigIfCurrent(
+    const saved = await updateConnectorEncryptedConfigIfCurrent(
       env.DB,
       connectorId,
-      settings.encrypted_config,
+      tracking.encryptedConfig,
       await encryptJson(
         awaitingOtp
           ? {
@@ -197,6 +301,11 @@ export async function syncMegabank(
         configEncryptionKey(env),
       ),
     );
+    if (!saved) {
+      throw new NeedsUserActionError(
+        "兆豐銀行設定在同步期間已變更，請重新同步。",
+      );
+    }
     if (awaitingOtp) throw error;
     if (error instanceof MegabankVerificationRequiredError) {
       throw new NeedsUserActionError(error.message);
@@ -233,7 +342,7 @@ export async function syncMegabank(
   );
   if (
     (await requireConnectorSettings(env.DB, connectorId)).encrypted_config !==
-    settings.encrypted_config
+    tracking.encryptedConfig
   ) {
     throw new NeedsUserActionError(
       "兆豐銀行設定在同步期間已變更，請重新同步。",
@@ -241,7 +350,7 @@ export async function syncMegabank(
   }
   const settingsGuard = {
     connectorId,
-    encryptedConfig: settings.encrypted_config,
+    encryptedConfig: tracking.encryptedConfig,
   } as const;
   let persistedCursor: string | undefined;
   let persistedEncryptedConfig: string | undefined;
@@ -262,7 +371,7 @@ export async function syncMegabank(
         serializePublicConfig(connectorId, cleanedConfig),
         persistedCursor,
         now,
-        settings.encrypted_config,
+        tracking.encryptedConfig,
       ),
     );
   }
@@ -272,7 +381,7 @@ export async function syncMegabank(
     records,
     {
       sourcePattern: "megabank:card:tx:%",
-      encryptedConfig: settings.encrypted_config,
+      encryptedConfig: tracking.encryptedConfig,
       cardId: (row) => {
         if (!row.source_id.startsWith("megabank:card:tx:")) return undefined;
         const metadata = JSON.parse(row.raw_payload || "{}") as {

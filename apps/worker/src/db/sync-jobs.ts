@@ -72,6 +72,7 @@ export interface SyncJobRow<TConnectorId extends string = string> {
   schedule_mode: SyncScheduleMode;
   preferred_time: string;
   preferred_weekday: number;
+  preferred_weekdays: number[];
   locked_until: string | null;
   locked_by: string | null;
   lock_trigger: SyncTrigger | null;
@@ -110,6 +111,10 @@ export const syncJobSelection = {
   schedule_mode: sql<SyncJobRow["schedule_mode"]>`${syncJobs.scheduleMode}`,
   preferred_time: syncJobs.preferredTime,
   preferred_weekday: syncJobs.preferredWeekday,
+  preferred_weekdays:
+    sql`COALESCE(${syncJobs.preferredWeekdays}, json_array(${syncJobs.preferredWeekday}))`.mapWith(
+      syncJobs.preferredWeekdays,
+    ),
   locked_until: syncJobs.lockedUntil,
   locked_by: syncJobs.lockedBy,
   lock_trigger: sql<SyncJobRow["lock_trigger"]>`${syncJobs.lockTrigger}`,
@@ -129,7 +134,7 @@ export function nextSyncRunAt(
   preferredTime: string,
   now = new Date(),
   _anchor?: string,
-  preferredWeekday = 1,
+  preferredWeekdays = [1],
 ) {
   if (intervalMinutes < 1440) {
     return new Date(now.getTime() + intervalMinutes * 60_000).toISOString();
@@ -155,12 +160,14 @@ export function nextSyncRunAt(
     ) - TAIPEI_OFFSET_MS;
 
   if (intervalMinutes === 10080) {
-    const safeWeekday = Number.isInteger(preferredWeekday)
-      ? Math.min(6, Math.max(0, preferredWeekday))
-      : 1;
-    const daysAhead = (safeWeekday - taipeiNow.getUTCDay() + 7) % 7;
-    candidate += daysAhead * 86_400_000;
-    if (candidate <= now.getTime()) candidate += 7 * 86_400_000;
+    candidate = Math.min(
+      ...preferredWeekdays.map((day) => {
+        let next =
+          candidate + ((day - taipeiNow.getUTCDay() + 7) % 7) * 86_400_000;
+        if (next <= now.getTime()) next += 7 * 86_400_000;
+        return next;
+      }),
+    );
   } else if (candidate <= now.getTime()) {
     candidate += 86_400_000;
   }
@@ -296,7 +303,7 @@ export async function completeSyncJob(
     job.preferred_time,
     now,
     job.next_run_at,
-    job.preferred_weekday,
+    job.preferred_weekdays,
   );
   const result = await createDrizzle(db)
     .update(syncJobs)
@@ -335,7 +342,7 @@ export async function failSyncJob(
           job.preferred_time,
           now,
           job.next_run_at,
-          job.preferred_weekday,
+          job.preferred_weekdays,
         )
       : job.next_run_at;
   const result = await createDrizzle(db)
