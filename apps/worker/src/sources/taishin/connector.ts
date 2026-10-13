@@ -15,6 +15,7 @@ import puppeteer, {
   type HTTPResponse,
 } from "@cloudflare/puppeteer";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { reportSyncProgress } from "../sync-progress";
 import { isNoCreditCardMessage } from "../credit-card-status";
 import {
   parseTaishinCreditCardData,
@@ -25,6 +26,7 @@ import {
 } from "./protocol";
 import {
   fetchTaishinDeposits,
+  TaishinDepositNoPermissionError,
   TaishinDepositProtocolError,
 } from "./deposit-protocol";
 
@@ -314,6 +316,7 @@ export function createTaishinConnector(
           );
         }
         authenticated = true;
+        reportSyncProgress("fetching");
         stage = "dismiss_password_reminder";
         pageContext = await dismissPasswordReminder(page, reusedSessionFrame);
 
@@ -331,8 +334,10 @@ export function createTaishinConnector(
             throw error;
           }
           stage = "login";
+          reportSyncProgress("login");
           pageContext = await loginWithOcr(page, config, recognizeCaptcha);
           authenticated = true;
+          reportSyncProgress("fetching");
           stage = "dismiss_password_reminder";
           pageContext = await dismissPasswordReminder(page);
           data = await fetchTaishinBankData(
@@ -902,6 +907,10 @@ async function postJson(
         throw new TaishinVerificationRequiredError(
           "台新銀行 session 已失效，需要重新登入。",
         );
+      // Online banking may list an account it cannot query, such as a
+      // securities settlement account; the bank answers EBF0015 for it.
+      if (path.endsWith("/web1/rb0101/query") && detail.startsWith("(EBF0015)"))
+        throw new TaishinDepositNoPermissionError();
       throw new TaishinConnectionError(
         `台新銀行 API ${endpoint} 回傳錯誤${detail ? `：${detail}` : ""}。`,
       );
@@ -909,6 +918,7 @@ async function postJson(
     return payload;
   } catch (error) {
     if (error instanceof TaishinNoCreditCardError) throw error;
+    if (error instanceof TaishinDepositNoPermissionError) throw error;
     if (error instanceof TaishinVerificationRequiredError) throw error;
     if (error instanceof TaishinConnectionError) throw error;
     if (diagnostic) diagnostic.validJson = false;

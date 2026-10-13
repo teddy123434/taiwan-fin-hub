@@ -14,6 +14,7 @@ import puppeteer, {
   type Page,
 } from "@cloudflare/puppeteer";
 import { isNoCreditCardMessage } from "../credit-card-status";
+import { reportSyncProgress } from "../sync-progress";
 import { parseHncbData, type HncbConfig } from "./protocol";
 
 const LOGIN_URL =
@@ -250,6 +251,7 @@ export function createHncbConnector(
             }
             authenticated = true;
             await waitForMainFrame(page);
+            reportSyncProgress("fetching");
 
             const depositOverviewHtml = await fetchDepositOverview(page);
             const unbilledHtml = await fetchCreditCardBill(page, "0");

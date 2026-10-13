@@ -20,6 +20,7 @@ import type {
   CreditCardBill,
 } from "@taiwan-fin-hub/shared";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { reportSyncProgress } from "../sync-progress";
 import {
   fetchSinopacDeposits,
   isSinopacDepositEmptyTransactions,
@@ -196,6 +197,7 @@ export function createSinopacConnector(
       );
       const now = new Date();
 
+      reportSyncProgress("fetching");
       const deposits = await client.fetchDeposits(now);
 
       const payloads = await client.fetchCreditCards();

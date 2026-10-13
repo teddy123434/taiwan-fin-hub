@@ -46,6 +46,8 @@ export const syncJobs = sqliteTable(
     preferredWeekdays: text("preferred_weekdays", { mode: "json" }).$type<
       number[]
     >(),
+    lastErrorCode: text("last_error_code"),
+    lockPhase: text("lock_phase"),
   },
   (table) => [
     primaryKey({ columns: [table.id] }),
@@ -436,6 +438,40 @@ export const tdccSyncRunItems = sqliteTable(
     check(
       "tdcc_sync_run_items_check_3",
       sql`status IN ('pending', 'processing', 'done', 'failed')`,
+    ),
+  ],
+);
+
+export const manualSyncRuns = sqliteTable(
+  "manual_sync_runs",
+  {
+    id: text("id").notNull(),
+    connectorId: text("connector_id").notNull(),
+    scope: text("scope")
+      .notNull()
+      .default(sql`'all'`),
+    status: text("status").notNull(),
+    errorCode: text("error_code"),
+    lastError: text("last_error"),
+    retryCount: integer("retry_count")
+      .notNull()
+      .default(sql`0`),
+    createdAt: text("created_at").notNull(),
+    startedAt: text("started_at"),
+    updatedAt: text("updated_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.id] }),
+    index("idx_manual_sync_runs_completed").on(sql`completed_at DESC`),
+    uniqueIndex("idx_manual_sync_runs_one_active")
+      .on(table.connectorId)
+      .where(sql`status IN ('queued', 'running')`),
+    check(
+      "manual_sync_runs_check_1",
+      sql`status IN (
+    'queued', 'running', 'completed', 'failed', 'needs_user_action', 'cancelled'
+  )`,
     ),
   ],
 );

@@ -452,16 +452,18 @@ function unbilledData(payload: unknown): {
       }
     }
   }
-  if (value.showRB0712_SUBTOTAL == null && hasRows)
+  // Without unbilled spending the bank fills the subtotal with the
+  // no-consumption message instead of 0.
+  const subtotal = isTaishinNoConsumption(value.showRB0712_SUBTOTAL)
+    ? undefined
+    : value.showRB0712_SUBTOTAL;
+  if (subtotal == null && hasRows)
     throw new Error("台新未出帳消費回應缺少新臺幣總額。");
   // The bank's TWD subtotal includes refunds and excludes payments. Summing
   // transaction rows would deduct payments twice and mix unconverted currencies.
   return {
     transactions: candidates,
-    totalAmount:
-      value.showRB0712_SUBTOTAL == null
-        ? 0
-        : cardAmount(value.showRB0712_SUBTOTAL),
+    totalAmount: subtotal == null ? 0 : cardAmount(subtotal),
   };
 }
 

@@ -8,14 +8,17 @@ import {
 } from "../../features/sync/config";
 import { decryptJson } from "../../platform/crypto";
 import { configEncryptionKey } from "../../platform/config";
-import { parseCtbcConfig } from "./protocol";
+import { parseCtbcConfig, type CtbcPendingSession } from "./protocol";
 import {
   parsePublicConnectorConfig,
   splitConnectorCursorState,
 } from "../../features/sync/connector-state";
 import {
   createCtbcConnector,
+  CtbcTwoStageRequiredError,
+  CtbcVerificationExpiredError,
   CtbcVerificationRequiredError,
+  type CtbcSyncOverrides,
 } from "./mobile-api";
 import { createCtbcFetch } from "./connector";
 import { NeedsUserActionError } from "../../features/sync/errors";
@@ -31,6 +34,8 @@ import {
 } from "../../features/sync/record-mapper";
 import {
   connectorStateStatement,
+  connectorSettingsGuardStatement,
+  updateConnectorEncryptedConfigIfCurrent,
   linkCanonicalBankAccountsStatement,
 } from "../../features/sync/connector-repository";
 import { prepareCtbcAuthorizationWrite } from "./authorizations";
@@ -42,6 +47,7 @@ import {
 export async function syncCtbc(
   env: Env,
   trigger: SyncTrigger,
+  overrides: CtbcSyncOverrides = {},
 ): Promise<SyncOutcome> {
   const connectorId = "ctbc";
   const scope = "all";
@@ -54,6 +60,43 @@ export async function syncCtbc(
     ...stored,
     ...parsePublicConnectorConfig(connectorId, settings.public_config),
   });
+  let encryptedConfig = settings.encrypted_config;
+  const savePendingSession = async (
+    pendingSession: CtbcPendingSession | undefined,
+  ) => {
+    if (config.pendingSession === undefined && pendingSession === undefined)
+      return;
+    config.pendingSession = pendingSession;
+    await saveConfig();
+  };
+  const saveConfig = async () => {
+    const next = await encryptConnectorConfig(env, connectorId, config);
+    if (
+      !(await updateConnectorEncryptedConfigIfCurrent(
+        env.DB,
+        connectorId,
+        encryptedConfig,
+        next,
+      ))
+    ) {
+      throw new CtbcVerificationRequiredError(
+        "中國信託設定在登入期間已變更，請重新同步。",
+      );
+    }
+    encryptedConfig = next;
+  };
+
+  // Persist before any bank request, including failures and MFA challenges.
+  // Changing a password keeps this identity; changing customer/account resets it.
+  if (!config.deviceCode) {
+    config.deviceCode = crypto.randomUUID();
+    await saveConfig();
+  }
+  // Older pending logins already carry the seed used for the App approval.
+  if (!config.deviceSeed && config.pendingSession?.seed) {
+    config.deviceSeed = config.pendingSession.seed;
+    await saveConfig();
+  }
 
   console.log(
     `[sync] ${connectorId}/${scope}: starting trigger=${trigger} (cursor=${settings.sync_cursor ? "set" : "none"})`,
@@ -64,11 +107,23 @@ export async function syncCtbc(
   >;
   try {
     const fetcher = createCtbcFetch(env);
-    const connector = fetcher
-      ? createCtbcConnector(fetcher)
-      : createCtbcConnector();
-    result = await connector.sync(config, settings.sync_cursor ?? undefined);
+    const connector = createCtbcConnector(fetcher, {
+      allowInteractiveVerification: trigger === "manual",
+      onDeviceSeed: async (seed) => {
+        config.deviceSeed = seed;
+        await saveConfig();
+      },
+      onPendingSession: savePendingSession,
+    });
+    result = await connector.sync(
+      config,
+      settings.sync_cursor ?? undefined,
+      overrides,
+    );
   } catch (error) {
+    if (error instanceof CtbcTwoStageRequiredError) throw error;
+    await savePendingSession(undefined);
+    if (error instanceof CtbcVerificationExpiredError) throw error;
     if (error instanceof CtbcVerificationRequiredError) {
       throw new NeedsUserActionError(error.message);
     }
@@ -112,6 +167,7 @@ export async function syncCtbc(
         serializePublicConfig(connectorId, config),
         persistedCursor,
         now,
+        encryptedConfig,
       ),
     );
   }
@@ -122,6 +178,14 @@ export async function syncCtbc(
   );
   const newRecords = await persistStagedSyncWrite(env.DB, {
     records: authorizationWrite.records,
+    beforePromoteStatements: [
+      connectorSettingsGuardStatement(
+        env.DB,
+        connectorId,
+        encryptedConfig,
+        settings.updated_at,
+      ),
+    ],
     afterPromoteStatements: [
       ...authorizationWrite.afterPromoteStatements,
       ...(bankAccounts.length > 0
@@ -129,6 +193,17 @@ export async function syncCtbc(
         : []),
     ],
     finalizeStatements,
+  }).catch(async (error) => {
+    const current = await requireConnectorSettings(env.DB, connectorId);
+    if (
+      current.encrypted_config !== encryptedConfig ||
+      current.updated_at !== settings.updated_at
+    ) {
+      throw new NeedsUserActionError(
+        "中國信託設定在同步期間已變更，請重新同步。",
+      );
+    }
+    throw error;
   });
 
   if (bankBalanceSnapshots.length > 0) {

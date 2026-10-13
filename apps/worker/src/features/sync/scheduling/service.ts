@@ -3,6 +3,7 @@ import { nextSyncRunAt, type SyncScheduleMode } from "../../../db";
 import { getActiveEinvoiceRun } from "../../../sources/einvoice/run-repository";
 import { getActiveTdccRun } from "../../../sources/tdcc/run-repository";
 import { durableRunState } from "../run-state";
+import { listLatestManualSyncRuns } from "../manual-run-repository";
 import {
   findDefaultSyncSchedule,
   findSyncJob,
@@ -56,29 +57,53 @@ export async function setDefaultSyncSchedule(
 export async function getSyncJobs(db: D1Database) {
   const rows = await listSyncJobs(db);
   const now = new Date();
-  const [activeEinvoiceRun, activeTdccRun] = await Promise.all([
+  const [activeEinvoiceRun, activeTdccRun, manualRuns] = await Promise.all([
     getActiveEinvoiceRun(db),
     getActiveTdccRun(db),
+    listLatestManualSyncRuns(db),
   ]);
-  return rows.map((row) => {
+  const manualRunByConnector = new Map(
+    manualRuns.map((run) => [run.connectorId, run]),
+  );
+  return rows.map(({ lockPhase, ...row }) => {
     const run =
       row.connectorId === "einvoice"
         ? activeEinvoiceRun
         : row.connectorId === "tdcc"
           ? activeTdccRun
           : null;
+    const manualRun =
+      row.scope === "all"
+        ? (manualRunByConnector.get(row.connectorId) ?? null)
+        : null;
     const locked = Boolean(row.lockedUntil && new Date(row.lockedUntil) > now);
+    // 排隊中的背景手動同步尚未取得 connector lock，仍視為執行中。
+    const queuedManual = !locked && manualRun?.status === "queued";
     const state = run ? durableRunState(run, now.getTime()) : null;
     return {
       ...row,
       configured: Boolean(row.configured),
       enabled: Boolean(row.enabled),
       lockScope: run ? ("scope" in run ? run.scope : "all") : row.lockScope,
-      lockTrigger: run?.trigger ?? row.lockTrigger,
-      running: Boolean(run) || locked,
-      runId: state?.runId ?? (locked ? row.lockedBy : null),
-      phase: state?.phase ?? (locked ? "processing" : null),
-      lastProgressAt: state?.lastProgressAt ?? (locked ? row.updatedAt : null),
+      lockTrigger: run?.trigger ?? (queuedManual ? "manual" : row.lockTrigger),
+      running: Boolean(run) || locked || queuedManual,
+      runId:
+        state?.runId ??
+        (locked ? row.lockedBy : queuedManual ? manualRun.id : null),
+      phase:
+        state?.phase ??
+        (locked ? (lockPhase ?? "processing") : queuedManual ? "queued" : null),
+      lastProgressAt:
+        state?.lastProgressAt ??
+        (locked ? row.updatedAt : queuedManual ? manualRun.updatedAt : null),
+      manualRun: manualRun && {
+        id: manualRun.id,
+        status: manualRun.status,
+        errorCode: manualRun.errorCode,
+        lastError: manualRun.lastError,
+        createdAt: manualRun.createdAt,
+        completedAt: manualRun.completedAt,
+      },
       retryAfterSeconds:
         state?.retryAfterSeconds ??
         (locked

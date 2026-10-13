@@ -3,6 +3,8 @@ import type { ConnectorId } from "@taiwan-fin-hub/shared";
 
 export const SYNC_LOCK_LEASE_MS = 10 * 60 * 1000;
 export const SYNC_MAX_DURATION_MS = 10 * 60 * 1000;
+/** 背景手動同步在 Queue 等待開始的上限；執行期限自開始時才起算。 */
+export const MANUAL_SYNC_QUEUE_TIMEOUT_MS = 30 * 60 * 1000;
 
 const SYNC_LOCK_HEARTBEAT_MS = 5 * 60 * 1000;
 

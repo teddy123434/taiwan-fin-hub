@@ -24,6 +24,7 @@ import puppeteer, {
   type Page,
 } from "@cloudflare/puppeteer";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { reportSyncProgress } from "../sync-progress";
 import { parseRakutenData, type RakutenConfig } from "./protocol";
 
 // 網址與 API 端點定義
@@ -425,6 +426,7 @@ export function createRakutenConnector(
             HOME_PATH_MARKER,
           );
           loggedIn = true;
+          reportSyncProgress("fetching");
 
           // --- 存款：首頁 CHMQU0001 解密後的回應 ---
           stage = "fetch_dashboard";

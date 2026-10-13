@@ -128,8 +128,10 @@ export {
   nextSyncRunAt,
   releaseSyncJobLock,
   renewSyncJobLock,
+  updateSyncJobLockPhase,
 } from "./sync-jobs";
 export type {
+  SyncFailureInput,
   SyncJobRow,
   SyncScheduleMode,
   SyncStatus,

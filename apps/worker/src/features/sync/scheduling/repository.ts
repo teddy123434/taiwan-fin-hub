@@ -132,10 +132,12 @@ export async function listSyncJobs(db: D1Database) {
       lockedBy: syncJobs.lockedBy,
       lockTrigger: sql<SyncTrigger | null>`${syncJobs.lockTrigger}`,
       lockScope: syncJobs.lockScope,
+      lockPhase: syncJobs.lockPhase,
       lastRunAt: syncJobs.lastRunAt,
       lastSuccessAt: syncJobs.lastSuccessAt,
       lastStatus: sql<SyncStatus | null>`${syncJobs.lastStatus}`,
       lastError: syncJobs.lastError,
+      lastErrorCode: syncJobs.lastErrorCode,
       updatedAt: syncJobs.updatedAt,
     })
     .from(syncJobs)

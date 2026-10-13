@@ -113,6 +113,12 @@ npm run verify:web
 
 ## 同步狀態與重試
 
+中信的 `CtbcVerification` 子元件使用設定 API 的驗證方式與到期時間顯示 App 核准或
+四位 Email OTP，手動呼叫同一 `/api/connectors/ctbc/sync` 接續驗證。
+等待期間停用一般同步按鈕，不自動輪詢銀行或重送 OTP；到期後由使用者按「重新開始驗證」。
+介面明確說明核准適用當次登入，目前未支援網銀信任瀏覽器，後續同步仍可能需要核准。
+驗證後刷新設定、同步工作與金融資料；帳密儲存後重設本機驗證提示。
+
 預設排程與來源自訂排程的每週執行日共用 `WeekdayPicker`，可複選並至少保留一天，
 所有勾選星期共用同一個開始時間（Asia/Taipei）。前端使用 API 已正規化的
 `preferredWeekdays` 陣列；排程摘要以週一至週日的順序顯示所有勾選日。
@@ -125,3 +131,16 @@ Demo 模式與排程資料尚未載入時停用編輯。
 
 `ConnectorPanel` 依 `GET /api/sync-jobs` 的 `running` 與 `phase` 追蹤電子發票／集保 active run，不能只依 connector lock 到期判定完成。API 同時提供 run ID、最近狀態更新時間與最短重試等待秒數；一般同步的狀態時間可能包含 heartbeat，不能當成金融資料更新時間。
 `phase = stalled` 時保留 polling，顯示停滯提示與「重試同步」，補送既有 run 的 continuation；集保保留原 run 的 scope。有效 lease 下的工作仍禁止重複同步，重試排入 Queue 後須等待 lifecycle 完成才顯示成功。
+
+一般銀行不帶輸入的手動同步回傳 202 後在背景執行，離開或重新整理頁面不影響同步。
+`syncJobsQuery` 在任一來源 `running` 時每 3 秒重新查詢，全部閒置即停止。狀態列以一行顯示
+`phase` 對應的階段（排隊中、正在登入、正在取得資料、正在儲存結果）或最近結果，瀏覽器銀行另附登入
+保存狀態；自動同步開關以「開啟／關閉自動同步」按鈕表示。來源執行中
+（含排隊、排程與其他手動同步）時停用該來源的同步與人工驗證按鈕，並顯示「排隊中…」、
+「同步中…」或「排程同步中…」。`ConnectorPanel` 記住本頁送出的背景 run ID，等
+`manualRun` 結案後沿用同步請求的成功／錯誤處理；失敗時以 `manualRun.errorCode` 建立
+`ApiRequestError`，接續人工驗證碼、兆豐簡訊 OTP、國泰／中信驗證與集保 OTP 等既有流程。
+回到頁面時若最近結果為 `needs_user_action` 且 `lastErrorCode` 可接續（人工驗證碼、
+三分鐘內的兆豐 OTP、集保 OTP），顯示「處理」提示。首次同步成功後開啟排程由後端處理，
+前端不另外送出排程更新。帶驗證碼或 OTP 的接續請求仍在 request 內完成；請求被中斷時改以
+輪詢 sync job 判斷結果。集保首次連線排入背景後，等 Queue 初始化結果決定進入 OTP 步驟或完成。

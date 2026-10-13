@@ -417,7 +417,9 @@
         "schedule_mode": "排程模式；inherit 使用全域設定，custom 使用工作自己的設定。",
         "preferred_time": "每日或每週排程偏好的台北時間。",
         "preferred_weekday": "每週排程的單日相容欄位，0 代表週日、6 代表週六；有星期清單時保存清單第一天。",
-        "preferred_weekdays": "每週執行日的 JSON 陣列，0 代表週日、6 代表週六；NULL 沿用 preferred_weekday 單日設定。"
+        "preferred_weekdays": "每週執行日的 JSON 陣列，0 代表週日、6 代表週六；NULL 沿用 preferred_weekday 單日設定。",
+        "last_error_code": "最近一次失敗或需要使用者處理的 API 錯誤代碼，供前端接續驗證流程；成功時清空。",
+        "lock_phase": "持有同步鎖的一般同步目前階段：login 登入、fetching 取得資料、saving 儲存結果；取得或釋放鎖時清空。"
       }
     },
     "sync_schedule_settings": {
@@ -497,6 +499,23 @@
         "updated_at": "同步執行記錄最後更新的時間。",
         "promoted_at": "暫存結果成功寫入正式金融資料表的時間。",
         "completed_at": "此次同步成功、失敗或需要使用者處理而結案的時間。"
+      }
+    },
+    "manual_sync_runs": {
+      "description": "使用者按下同步後交由 Queue consumer 執行的背景手動同步，讓前端離開或重新整理不影響同步。",
+      "notes": "每個來源同時最多一個 queued 或 running run；來源的同步鎖被其他同步占用時不建立。Queue 訊息只帶 run ID，不保存憑證、OTP、驗證碼或 session；需要使用者輸入的 challenge 仍只存於來源的加密設定。只有持有同步鎖的 queued run 能轉為 running，重送訊息不會再次登入銀行。已結案超過 7 天的 run 由 Cron 恢復流程清除。",
+      "columns": {
+        "id": "背景執行 ID，也是執行期間的同步鎖 owner。",
+        "connector_id": "要同步的來源。",
+        "scope": "同步範圍；一般來源為 all。",
+        "status": "queued 排隊中、running 執行中、completed 完成、failed 失敗、needs_user_action 需要使用者處理、cancelled 已取消。",
+        "error_code": "失敗或需要處理時的 API 錯誤代碼，供前端決定後續操作。",
+        "last_error": "已遮蔽敏感資訊的錯誤訊息。",
+        "retry_count": "登入前因 Browser Run 容量不足而重新排隊的次數。",
+        "created_at": "排入佇列的時間，用於判斷排隊逾時。",
+        "started_at": "Queue consumer 取得同步鎖並開始執行的時間；重新排隊時清除。",
+        "updated_at": "最後一次狀態轉換的時間。",
+        "completed_at": "完成、失敗、需要處理或取消而結案的時間。"
       }
     },
     "sync_activity_runs": {

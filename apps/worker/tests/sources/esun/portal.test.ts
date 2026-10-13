@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildEsunCreditTimelinePages,
+  collectEsunSnapshot,
   readEsunCardBalances,
+  type EsunPortalApi,
   type EsunSnapshot,
 } from "../../../src/sources/esun/portal";
 import {
@@ -165,5 +167,56 @@ describe("E.SUN credit card timeline normalization", () => {
     expect(rows.map((row) => row.amount).sort((a, b) => a - b)).toEqual([
       -199, 199,
     ]);
+  });
+});
+
+// Deposit prequery answers seen on a real card-only account (fields unrelated
+// to the decision omitted).
+const noTwdAccount = {
+  resultCode: "S001",
+  resultDescription: "親愛的顧客您好，查無臺幣帳號，或您尚未開立臺幣帳戶。",
+  resultBody: null,
+  errorMessages: null,
+};
+const noForeignAccount = {
+  resultCode: "S001",
+  resultDescription: "親愛的顧客您好，查無外幣帳號，或您尚未開立外幣帳戶。",
+  resultBody: null,
+  errorMessages: null,
+};
+
+function depositApi(twPrequery: unknown, frPrequery: unknown): EsunPortalApi {
+  return {
+    postIesc: async (path) => {
+      if (path === "common/isCardholder")
+        return { body: { rtnCode: "S", credit: false } };
+      throw new Error(`unexpected IESC request: ${path}`);
+    },
+    postPortal: async (path) =>
+      path.endsWith("/preQueryTWTransactionDetail")
+        ? twPrequery
+        : path.endsWith("/preQueryFRTransactionDetail")
+          ? frPrequery
+          : { resultCode: "0000" },
+    readRealtime: async () => {
+      throw new Error("unexpected realtime request");
+    },
+  };
+}
+
+describe("E.SUN deposit accounts", () => {
+  it("skips TWD and foreign deposits the customer does not hold, but fails on the other currency's notice", async () => {
+    const snapshot = await collectEsunSnapshot(
+      depositApi(noTwdAccount, noForeignAccount),
+    );
+    expect(snapshot.twDeposits).toEqual([]);
+    expect(snapshot.frDeposits).toEqual([]);
+    for (const [tw, fr] of [
+      [noForeignAccount, noForeignAccount],
+      [noTwdAccount, noTwdAccount],
+    ])
+      await expect(collectEsunSnapshot(depositApi(tw, fr))).rejects.toThrow(
+        "E.SUN portal deposit-prequery failed (S001).",
+      );
   });
 });

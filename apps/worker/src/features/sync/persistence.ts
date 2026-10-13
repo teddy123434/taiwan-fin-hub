@@ -9,6 +9,7 @@ import {
 } from "../../db";
 import { eq, lt } from "drizzle-orm";
 import type { ConnectorId, SyncNewRecordCounts } from "@taiwan-fin-hub/shared";
+import { reportSyncProgress } from "../../sources/sync-progress";
 
 export type SyncEntityType =
   | "invoice"
@@ -481,6 +482,7 @@ export async function persistStagedSyncWrite(
     finalizeStatements?: D1PreparedStatement[];
   },
 ) {
+  reportSyncProgress("saving");
   const runId = crypto.randomUUID();
   await createDrizzle(db)
     .delete(syncWriteStaging)

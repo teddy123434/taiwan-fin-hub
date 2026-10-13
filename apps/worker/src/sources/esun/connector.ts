@@ -22,6 +22,7 @@ import type {
   CreditCardBill,
 } from "@taiwan-fin-hub/shared";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { reportSyncProgress } from "../sync-progress";
 import { type EsunConfig } from "./protocol";
 
 const HOME_URL = "https://ebank.esunbank.com.tw/indexMobile.jsp";
@@ -73,6 +74,7 @@ export function createEsunConnector(browser?: Fetcher) {
         }
         await loginWithBrowser(browser, client, config);
       }
+      reportSyncProgress("fetching");
 
       const cursorState = readCursor(cursor);
       const depositWatermarks: Record<string, string> = {};
@@ -150,6 +152,7 @@ async function loginWithBrowser(
   try {
     console.log("[esun debug] login page opened");
     await loginMobilePage(page, config);
+    reportSyncProgress("fetching");
     console.log("[esun debug] login succeeded, collecting account data");
     const collected = await collectEsunBrowserSnapshot(browser, page);
     client.snapshot = collected.snapshot;

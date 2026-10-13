@@ -148,4 +148,58 @@ describe("連線設定的憑證安全（隔離 D1）", () => {
       sessionAvailable: false,
     });
   });
+
+  it("中信換密碼保留裝置但清除待驗證登入，切換帳號才更換裝置", async () => {
+    const env = { DB: harness.binding, CONFIG_ENCRYPTION_KEY: key } as Env;
+    const deviceCode = "11111111-2222-4333-8444-555555555555";
+    await updateConnectorSettings(env, "ctbc", credentials);
+    await env.DB.prepare(
+      "UPDATE connector_settings SET encrypted_config = ?, sync_cursor = 'old-cursor' WHERE connector_id = 'ctbc'",
+    )
+      .bind(
+        await encryptJson(
+          {
+            ...credentials,
+            deviceCode,
+            deviceSeed: "private-device-seed",
+            pendingSession: {
+              clientNo: "private-client",
+              accessToken: "private-access",
+              xAuthToken: "private-auth",
+              transactionToken: "private-transaction",
+              seed: "private-seed",
+              loginRequest: { pin: "private-pin" },
+              method: "email",
+              expiresAt: new Date(Date.now() + 120_000).toISOString(),
+            },
+          },
+          key,
+        ),
+      )
+      .run();
+    const view = await getConnectorSettingsView(env, "ctbc");
+    expect(view).toMatchObject({
+      verificationPending: true,
+      verificationChannel: "email",
+    });
+    expect(JSON.stringify(view)).not.toMatch(
+      /private-|deviceCode|deviceSeed|synthetic-|Token|pin/,
+    );
+    await updateConnectorSettings(env, "ctbc", { password: "new-password" });
+    let stored = (await getConnectorSettings(env.DB, "ctbc"))!;
+    expect(await decryptJson(stored.encrypted_config, key)).toEqual({
+      ...credentials,
+      password: "new-password",
+      deviceCode,
+      deviceSeed: "private-device-seed",
+    });
+    expect(stored.sync_cursor).toBeNull();
+    await updateConnectorSettings(env, "ctbc", { account: "different-user" });
+    stored = (await getConnectorSettings(env.DB, "ctbc"))!;
+    expect(await decryptJson(stored.encrypted_config, key)).toEqual({
+      ...credentials,
+      password: "new-password",
+      account: "different-user",
+    });
+  });
 });

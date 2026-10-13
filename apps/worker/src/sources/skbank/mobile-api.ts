@@ -1,4 +1,5 @@
 import type { SyncResult } from "../types";
+import { reportSyncProgress } from "../sync-progress";
 
 import forge from "node-forge";
 import {
@@ -173,6 +174,7 @@ export function createSkbankConnector(
       try {
         const publicKey = await session.getPublicKey();
         await session.login(credentials, publicKey);
+        reportSyncProgress("fetching");
         await session.get(USER_INFORMATION_PATH);
         await session.get(MEGA_MENU_PATH);
         const accountSummary = await session.get(ACCOUNT_SUMMARY_PATH);

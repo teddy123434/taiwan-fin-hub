@@ -46,6 +46,7 @@ import {
   type CathaySyncOverrides,
 } from "../../sources/cathaybk/sync";
 import { syncCtbc } from "../../sources/ctbc/sync";
+import type { CtbcSyncOverrides } from "../../sources/ctbc/mobile-api";
 import { syncSkbank } from "../../sources/skbank/sync";
 import { syncEsun } from "../../sources/esun/sync";
 import {
@@ -90,7 +91,8 @@ export const connectorRuntimeRegistry: Record<
       syncCathaybk(env, trigger, overrides as CathaySyncOverrides),
   },
   ctbc: {
-    run: (env, trigger) => syncCtbc(env, trigger),
+    run: (env, trigger, _scope, overrides) =>
+      syncCtbc(env, trigger, overrides as CtbcSyncOverrides),
   },
   skbank: {
     run: (env, trigger) => syncSkbank(env, trigger),

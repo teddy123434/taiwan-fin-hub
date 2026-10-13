@@ -1,13 +1,14 @@
 import type { ConnectorId } from "@taiwan-fin-hub/shared";
 
-export type ScheduledSyncQueueMessage =
+export type SyncQueueMessage =
   | { type: "run-next-scheduled-sync" }
   | { type: "run-einvoice-chunk"; runId: string }
-  | { type: "run-tdcc-chunk"; runId: string };
+  | { type: "run-tdcc-chunk"; runId: string }
+  | { type: "run-manual-sync"; runId: string };
 
 export interface Env {
   DB: D1Database;
-  SYNC_QUEUE: Queue<ScheduledSyncQueueMessage>;
+  SYNC_QUEUE: Queue<SyncQueueMessage>;
   ASSETS: Fetcher;
   BROWSER: Fetcher;
   AI: Ai;

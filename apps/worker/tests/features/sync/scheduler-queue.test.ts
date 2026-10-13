@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Env, ScheduledSyncQueueMessage } from "../../../src/platform/env";
+import type { Env, SyncQueueMessage } from "../../../src/platform/env";
 
 const mocks = vi.hoisted(() => ({
   failEinvoiceSyncRun: vi.fn(),
@@ -34,7 +34,7 @@ import {
   enqueueScheduledSync,
 } from "../../../src/features/sync/scheduling/queue";
 
-function queueMessage(body: ScheduledSyncQueueMessage) {
+function queueMessage(body: SyncQueueMessage) {
   return {
     id: "message-1",
     timestamp: new Date(),
@@ -42,22 +42,22 @@ function queueMessage(body: ScheduledSyncQueueMessage) {
     attempts: 1,
     ack: vi.fn(),
     retry: vi.fn(),
-  } as unknown as Message<ScheduledSyncQueueMessage>;
+  } as unknown as Message<SyncQueueMessage>;
 }
 
-function queueBatch(message: Message<ScheduledSyncQueueMessage>) {
+function queueBatch(message: Message<SyncQueueMessage>) {
   return {
     queue: "taiwan-fin-hub-sync",
     messages: [message],
     ackAll: vi.fn(),
     retryAll: vi.fn(),
-  } as unknown as MessageBatch<ScheduledSyncQueueMessage>;
+  } as unknown as MessageBatch<SyncQueueMessage>;
 }
 
 function env(send = vi.fn().mockResolvedValue(undefined)) {
   return {
     DB: {} as D1Database,
-    SYNC_QUEUE: { send } as unknown as Queue<ScheduledSyncQueueMessage>,
+    SYNC_QUEUE: { send } as unknown as Queue<SyncQueueMessage>,
   } as Env;
 }
 
@@ -99,10 +99,14 @@ describe("scheduled sync queue", () => {
       type: "run-einvoice-chunk",
       runId: "einvoice-run-1",
     });
+    const manual = queueMessage({
+      type: "run-manual-sync",
+      runId: "manual-run-1",
+    });
     const batch = {
       ...queueBatch(kick),
-      messages: [kick, tdcc, einvoice],
-    } as unknown as MessageBatch<ScheduledSyncQueueMessage>;
+      messages: [kick, tdcc, einvoice, manual],
+    } as unknown as MessageBatch<SyncQueueMessage>;
     vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     await consumeScheduledSyncQueue(batch, {
@@ -110,11 +114,15 @@ describe("scheduled sync queue", () => {
       DEMO_MODE: "true",
     } as Env);
 
-    for (const message of [kick, tdcc, einvoice]) {
+    for (const message of [kick, tdcc, einvoice, manual]) {
       expect(message.ack).toHaveBeenCalledOnce();
       expect(message.retry).not.toHaveBeenCalled();
     }
-    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledWith(
+      { type: "run-manual-sync", runId: "manual-run-1" },
+      { delaySeconds: DEMO_MODE_PARKED_CHUNK_DELAY_SECONDS },
+    );
     expect(send).toHaveBeenCalledWith(
       { type: "run-tdcc-chunk", runId: "tdcc-run-1" },
       { delaySeconds: DEMO_MODE_PARKED_CHUNK_DELAY_SECONDS },

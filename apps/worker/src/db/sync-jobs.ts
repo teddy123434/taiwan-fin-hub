@@ -81,6 +81,7 @@ export interface SyncJobRow<TConnectorId extends string = string> {
   last_success_at: string | null;
   last_status: SyncStatus | null;
   last_error: string | null;
+  last_error_code: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -123,6 +124,7 @@ export const syncJobSelection = {
   last_success_at: syncJobs.lastSuccessAt,
   last_status: sql<SyncJobRow["last_status"]>`${syncJobs.lastStatus}`,
   last_error: syncJobs.lastError,
+  last_error_code: syncJobs.lastErrorCode,
   created_at: syncJobs.createdAt,
   updated_at: syncJobs.updatedAt,
 };
@@ -228,6 +230,7 @@ export async function acquireSyncJobLock(
       lockedUntil,
       lockTrigger: input.trigger,
       lockScope: input.scope,
+      lockPhase: null,
       updatedAt: now.toISOString(),
     })
     .where(
@@ -283,9 +286,32 @@ export async function releaseSyncJobLock(
       lockedUntil: null,
       lockTrigger: null,
       lockScope: null,
+      lockPhase: null,
       updatedAt: new Date().toISOString(),
     })
     .where(and(eq(syncJobs.id, lockRowId), eq(syncJobs.lockedBy, runId)))
+    .run()
+    .catch((error) => {
+      throw sanitizeDatabaseError(error);
+    });
+}
+
+/** 只更新仍持有有效鎖的 owner；鎖釋放後遲到的進度不會覆寫。 */
+export async function updateSyncJobLockPhase(
+  db: D1Database,
+  input: { lockRowId: string; runId: string; phase: string },
+) {
+  const now = new Date().toISOString();
+  await createDrizzle(db)
+    .update(syncJobs)
+    .set({ lockPhase: input.phase, updatedAt: now })
+    .where(
+      and(
+        eq(syncJobs.id, input.lockRowId),
+        eq(syncJobs.lockedBy, input.runId),
+        gt(syncJobs.lockedUntil, now),
+      ),
+    )
     .run()
     .catch((error) => {
       throw sanitizeDatabaseError(error);
@@ -296,6 +322,7 @@ export async function completeSyncJob(
   db: D1Database,
   job: SyncJobRow,
   runId: string,
+  options: { enableAfterFirstSuccess?: boolean } = {},
 ) {
   const now = new Date();
   const nextRunAt = nextSyncRunAt(
@@ -305,11 +332,17 @@ export async function completeSyncJob(
     job.next_run_at,
     job.preferred_weekdays,
   );
+  const enable =
+    options.enableAfterFirstSuccess &&
+    !job.enabled &&
+    job.last_success_at === null;
   const result = await createDrizzle(db)
     .update(syncJobs)
     .set({
+      ...(enable ? { enabled: 1 } : {}),
       lastStatus: "success",
       lastError: null,
+      lastErrorCode: null,
       lastRunAt: now.toISOString(),
       lastSuccessAt: now.toISOString(),
       nextRunAt,
@@ -328,10 +361,16 @@ export async function completeSyncJob(
   return result.meta.changes === 1;
 }
 
+export type SyncFailureInput = {
+  status: SyncStatus;
+  errorMessage: string;
+  errorCode?: string | null;
+};
+
 export async function failSyncJob(
   db: D1Database,
   job: SyncJobRow,
-  input: { status: SyncStatus; errorMessage: string },
+  input: SyncFailureInput,
   runId: string,
 ) {
   const now = new Date();
@@ -350,6 +389,7 @@ export async function failSyncJob(
     .set({
       lastStatus: input.status,
       lastError: input.errorMessage,
+      lastErrorCode: input.errorCode ?? null,
       lastRunAt: now.toISOString(),
       nextRunAt,
       updatedAt: now.toISOString(),
@@ -367,6 +407,7 @@ export async function markManualSyncSuccess(
   connectorId: string,
   scope: string,
   runId: string,
+  options: { enableAfterFirstSuccess?: boolean } = {},
 ) {
   const jobId = `${connectorId}:${scope}`;
   const job = await createDrizzle(db)
@@ -380,14 +421,14 @@ export async function markManualSyncSuccess(
     });
   if (!job) return;
 
-  return completeSyncJob(db, job, runId);
+  return completeSyncJob(db, job, runId, options);
 }
 
 export async function markManualSyncFailure(
   db: D1Database,
   connectorId: string,
   scope: string,
-  input: { status: SyncStatus; errorMessage: string },
+  input: SyncFailureInput,
   runId: string,
 ) {
   const now = new Date().toISOString();
@@ -396,6 +437,7 @@ export async function markManualSyncFailure(
     .set({
       lastStatus: input.status,
       lastError: input.errorMessage,
+      lastErrorCode: input.errorCode ?? null,
       lastRunAt: now,
       updatedAt: now,
     })

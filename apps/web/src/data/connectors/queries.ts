@@ -9,10 +9,15 @@ import type {
 
 type ApiProvider = () => ApiClient;
 
+const SYNC_JOBS_POLL_MS = 3_000;
+
 export const syncJobsQuery = (getApi: ApiProvider) =>
   queryOptions({
     queryKey: queryKeys.syncJobs,
     queryFn: () => getApi().get<SyncJobRow[]>("/api/sync-jobs"),
+    // 背景同步不依附頁面；任一來源執行中時持續更新狀態，全部閒置即停止。
+    refetchInterval: (query) =>
+      query.state.data?.some((job) => job.running) ? SYNC_JOBS_POLL_MS : false,
   });
 
 export const syncScheduleQuery = (getApi: ApiProvider) =>

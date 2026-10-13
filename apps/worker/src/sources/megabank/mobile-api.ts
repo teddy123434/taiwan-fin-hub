@@ -1,4 +1,5 @@
 import type { SyncResult } from "../types";
+import { reportSyncProgress } from "../sync-progress";
 
 import forge from "node-forge";
 import {
@@ -363,6 +364,7 @@ async function completeVerifiedSync(
 async function fetchMegabankData(
   session: MegabankSession,
 ): Promise<SyncResult<never>> {
+  reportSyncProgress("fetching");
   const deposits = await session.resource(
     "megapmb",
     "/fco/fco10001/home",

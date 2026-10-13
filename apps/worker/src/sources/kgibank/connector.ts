@@ -7,6 +7,7 @@ import {
   closeBrowserSession,
   type ReportBrowserLoginStage,
 } from "../browser.js";
+import { reportSyncProgress } from "../sync-progress";
 import puppeteer, {
   type Browser,
   type Frame,
@@ -238,6 +239,7 @@ export function createKgibankConnector(
             "凱基網銀登入後沒有載入應用程式頁面。",
           );
         }
+        reportSyncProgress("fetching");
 
         const accountsResponse = await gatewayRequest(
           appFrame,

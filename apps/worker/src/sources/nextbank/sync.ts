@@ -39,6 +39,7 @@ import {
   bankTransactionRecord,
 } from "../../features/sync/record-mapper";
 import { prepareNextbankDepositWrite } from "./deposits";
+import { reportSyncProgress } from "../sync-progress";
 import {
   rebuildBankDepositHistory,
   dateFromIso,
@@ -189,6 +190,7 @@ export async function syncNextbank(
       password: config.password,
       captchaResult: answer,
     }));
+    reportSyncProgress("fetching");
     result = parseNextbankDeposits(
       await collectNextbankDepositPayloads(client, token),
     );

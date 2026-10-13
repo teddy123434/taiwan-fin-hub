@@ -12,7 +12,7 @@ export interface ConnectorSettings {
   credentialsComplete?: boolean;
   sessionAvailable?: boolean;
   verificationPending?: boolean;
-  verificationChannel?: "email" | "sms" | null;
+  verificationChannel?: "app" | "email" | "sms" | null;
   verificationExpiresAt?: string | null;
 }
 
@@ -35,12 +35,31 @@ export interface SyncJobRow {
   lastSuccessAt: string | null;
   lastStatus: "success" | "failed" | "needs_user_action" | null;
   lastError: string | null;
+  /** 最近一次失敗的 API 錯誤代碼；需要處理時用來接續驗證流程。 */
+  lastErrorCode: string | null;
   updatedAt: string;
   running: boolean;
   runId: string | null;
   phase: string | null;
   lastProgressAt: string | null;
   retryAfterSeconds: number;
+  /** 最近一次背景手動同步；電子發票與集保使用各自的 durable run，固定為 null。 */
+  manualRun: ManualSyncRun | null;
+}
+
+export interface ManualSyncRun {
+  id: string;
+  status:
+    | "queued"
+    | "running"
+    | "completed"
+    | "failed"
+    | "needs_user_action"
+    | "cancelled";
+  errorCode: string | null;
+  lastError: string | null;
+  createdAt: string;
+  completedAt: string | null;
 }
 
 export interface SyncScheduleSettings {

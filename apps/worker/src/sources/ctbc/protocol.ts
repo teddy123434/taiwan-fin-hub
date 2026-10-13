@@ -8,11 +8,29 @@ import forge from "node-forge";
 import { z } from "zod";
 import { BANK_SYNC_MONTHS } from "../sync-window";
 
+// Only the state needed to resume this login is retained, encrypted. A snapshot
+// expires within five minutes; bank response payloads and OTP are not retained.
+export const ctbcPendingSessionSchema = z.object({
+  clientNo: z.string().min(1),
+  accessToken: z.string().min(1),
+  xAuthToken: z.string(),
+  transactionToken: z.string().min(1),
+  seed: z.string(),
+  loginRequest: z.record(z.string(), z.unknown()),
+  method: z.enum(["app", "email"]),
+  expiresAt: z.iso.datetime(),
+});
+
+export type CtbcPendingSession = z.infer<typeof ctbcPendingSessionSchema>;
+
 /** 中國信託行動銀行 API 連接器設定。機密欄位由 Worker 加密保存。 */
 export const ctbcConfigSchema = z.object({
   userId: z.string().min(1).optional(),
   account: z.string().min(1).optional(),
   password: z.string().min(1).optional(),
+  deviceCode: z.guid().optional(),
+  deviceSeed: z.string().min(1).optional(),
+  pendingSession: ctbcPendingSessionSchema.optional(),
 });
 
 export type CtbcConfig = z.infer<typeof ctbcConfigSchema>;

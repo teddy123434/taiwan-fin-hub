@@ -212,8 +212,10 @@ export const connectorCatalog = {
     ],
     publicFields: [],
     credentialFields: ["userId", "account", "password"],
-    secretStateFields: [],
-    resetOnCredentialChangeFields: [],
+    secretStateFields: ["deviceCode", "deviceSeed", "pendingSession"],
+    // A password change ends the pending login, but keeps the same device.
+    // Switching customer/account identity also resets deviceCode/deviceSeed.
+    resetOnCredentialChangeFields: ["pendingSession"],
   },
   skbank: {
     id: "skbank",

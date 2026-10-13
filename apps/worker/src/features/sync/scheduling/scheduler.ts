@@ -7,8 +7,8 @@ import {
   findNextDueSyncJob,
   releaseSyncJobLock,
   type SyncJobRow,
-  type SyncStatus,
 } from "../../../db";
+import { syncFailureInput } from "../error-response";
 import type { Env } from "../../../platform/env";
 import { canonicalSyncLockRowId, SYNC_LOCK_LEASE_MS } from "../lock";
 import {
@@ -16,11 +16,7 @@ import {
   guardSyncDatabase,
   SyncLockLostError,
 } from "../execution";
-import {
-  isUserActionError,
-  safeErrorLogDetails,
-  safeErrorMessage,
-} from "../errors";
+import { safeErrorLogDetails } from "../errors";
 import { type SyncScope } from "../types";
 import { runConnectorSync } from "../registry";
 import {
@@ -254,19 +250,9 @@ async function runScheduledJob(
           status: "success",
         };
       } catch (error) {
-        const status: SyncStatus = isUserActionError(error)
-          ? "needs_user_action"
-          : "failed";
-        const message = safeErrorMessage(error);
-        const recorded = await failSyncJob(
-          env.DB,
-          due,
-          {
-            status,
-            errorMessage: message,
-          },
-          runId,
-        );
+        const failure = syncFailureInput(error);
+        const { status, errorMessage: message } = failure;
+        const recorded = await failSyncJob(env.DB, due, failure, runId);
         if (!recorded) return undefined;
         console.error(
           JSON.stringify({
@@ -295,7 +281,7 @@ async function runScheduledJob(
     const recorded = await failSyncJob(
       env.DB,
       due,
-      { status: "failed", errorMessage: safeErrorMessage(error) },
+      syncFailureInput(error, { forceFailed: true }),
       runId,
     );
     if (!recorded) return undefined;

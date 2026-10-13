@@ -15,10 +15,15 @@ import {
   completeSyncJob,
   failSyncJob,
   nextSyncRunAt,
+  findNextDueSyncJob,
 } from "../../../src/db";
 import * as dbApi from "../../../src/db";
 import { findSyncJob } from "../../../src/features/sync/scheduling/repository";
 import { getSyncJobs } from "../../../src/features/sync/scheduling/service";
+import {
+  ensureDefaultScheduleBatch,
+  findNextDefaultScheduleBatchJob,
+} from "../../../src/features/sync/scheduling/batch-repository";
 import { syncScheduleRoutes } from "../../../src/features/sync/scheduling/route";
 import { recoverStalledSyncRuns } from "../../../src/features/sync/scheduling/recovery";
 import {
@@ -224,6 +229,107 @@ describe("同步鎖與原子寫入（隔離 D1）", () => {
         runId: owner,
       }),
     ).toBe(false);
+  });
+
+  it("中信沿用預設或自訂每小時排程，同日再次到期仍可加入預設批次", async () => {
+    const db = harness.binding;
+    const current = "2026-10-12T00:00:00.000Z";
+    await db.batch([
+      ...["ctbc", "esun"].flatMap((connector) => [
+        db
+          .prepare(
+            `INSERT INTO sync_jobs (id, connector_id, scope, enabled, schedule_mode, interval_minutes, preferred_time, next_run_at, created_at, updated_at)
+        VALUES (?, ?, 'all', 1, 'inherit', 60, '06:00', ?, ?, ?)`,
+          )
+          .bind(`${connector}:all`, connector, now, now, now),
+        db
+          .prepare(
+            "INSERT INTO connector_settings (id, connector_id, encrypted_config, created_at, updated_at) VALUES (?, ?, 'config', ?, ?)",
+          )
+          .bind(connector, connector, now, now),
+      ]),
+    ]);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(current));
+    let batchId: string | null = null;
+    try {
+      const env = { DB: db } as Env;
+      const response = await syncScheduleRoutes.request(
+        "/sync-schedule",
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            intervalMinutes: 60,
+            preferredTime: "06:00",
+            preferredWeekdays: [1],
+          }),
+        },
+        env,
+      );
+      expect(response.status).toBe(200);
+      expect(await findSyncJob(db, "ctbc", "all")).toMatchObject({
+        interval_minutes: 60,
+        next_run_at: "2026-10-12T01:00:00.000Z",
+      });
+      expect(await findSyncJob(db, "esun", "all")).toMatchObject({
+        interval_minutes: 60,
+      });
+      const custom = await syncScheduleRoutes.request(
+        "/sync-jobs/ctbc/all",
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scheduleMode: "custom", intervalMinutes: 60 }),
+        },
+        env,
+      );
+      expect(await custom.json()).toMatchObject({ intervalMinutes: 60 });
+      expect(
+        (await getSyncJobs(db)).find((job) => job.connectorId === "ctbc"),
+      ).toMatchObject({ intervalMinutes: 60 });
+      // An hourly CTBC job is due again after an earlier attempt this Taipei day.
+      await db.batch([
+        db
+          .prepare(
+            "UPDATE sync_jobs SET next_run_at = ?, schedule_mode = 'inherit' WHERE connector_id IN ('ctbc', 'esun')",
+          )
+          .bind(current),
+        db
+          .prepare(
+            "UPDATE sync_jobs SET last_run_at = ? WHERE connector_id = 'ctbc'",
+          )
+          .bind("2026-10-11T23:00:00.000Z"),
+      ]);
+      expect((await findNextDueSyncJob(db))?.connector_id).toBe("ctbc");
+      batchId = await ensureDefaultScheduleBatch(db);
+      expect(
+        (
+          await db
+            .prepare(
+              "SELECT connector_id FROM scheduled_sync_batch_results WHERE batch_id = ? ORDER BY connector_id",
+            )
+            .bind(batchId)
+            .all()
+        ).results,
+      ).toEqual([{ connector_id: "ctbc" }, { connector_id: "esun" }]);
+      expect(
+        (await findNextDefaultScheduleBatchJob(db, batchId!))?.connector_id,
+      ).toBe("ctbc");
+    } finally {
+      vi.useRealTimers();
+      if (batchId)
+        await db.batch([
+          db
+            .prepare(
+              "DELETE FROM scheduled_sync_batch_results WHERE batch_id = ?",
+            )
+            .bind(batchId),
+          db
+            .prepare("DELETE FROM scheduled_sync_batches WHERE id = ?")
+            .bind(batchId),
+        ]);
+    }
   });
 
   it("鎖被接管後，舊同步不能寫入金融資料、cursor 或新工作的結果", async () => {

@@ -6,8 +6,17 @@ import { failTdccSyncRun } from "../../../sources/tdcc/sync";
 import { durableRunState } from "../run-state";
 import { SyncTimeoutError } from "../execution";
 import { safeErrorMessage } from "../errors";
+import { MANUAL_SYNC_QUEUE_TIMEOUT_MS } from "../lock";
+import {
+  deleteFinishedManualSyncRuns,
+  expireQueuedManualSyncRuns,
+  failInterruptedManualSyncRuns,
+} from "../manual-run-repository";
 
-/** Cron 補送無有效 chunk 租約且停止更新的 run；逾時者結案。 */
+/** 前端只需要最近一次結果；舊的背景手動同步紀錄定期清除。 */
+const MANUAL_SYNC_RUN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Cron 補送無有效 chunk 租約且停止更新的 run；逾時者結案，並關閉中斷或排隊逾時的背景手動同步。 */
 export async function recoverStalledSyncRuns(env: Env) {
   const [einvoice, tdcc] = await Promise.all([
     getActiveEinvoiceRun(env.DB),
@@ -60,12 +69,37 @@ export async function recoverStalledSyncRuns(env: Env) {
       );
     }
   }
+  try {
+    await expireQueuedManualSyncRuns(env.DB, {
+      createdBefore: new Date(
+        Date.now() - MANUAL_SYNC_QUEUE_TIMEOUT_MS,
+      ).toISOString(),
+      errorCode: "SYNC_QUEUE_TIMEOUT",
+      lastError: "同步排隊逾時，請重新同步。",
+    });
+    await failInterruptedManualSyncRuns(env.DB, {
+      errorCode: "SYNC_INTERRUPTED",
+      lastError: "同步已中斷或逾時，請重新同步。",
+    });
+    await deleteFinishedManualSyncRuns(
+      env.DB,
+      new Date(Date.now() - MANUAL_SYNC_RUN_RETENTION_MS).toISOString(),
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "manual_sync_recovery_failed",
+        error: safeErrorMessage(error),
+      }),
+    );
+  }
   const now = new Date().toISOString();
   // 普通同步停止續租後，清理原 owner 的殘留鎖並保留最後成功時間。
   // durable run 由上面的結案流程處理，不能只清除 connector lock。
   await env.DB.prepare(
     `UPDATE sync_jobs
     SET last_status = 'failed', last_error = '同步已中斷或逾時，請重新同步。',
+        last_error_code = 'SYNC_INTERRUPTED',
         last_run_at = ?, locked_by = NULL, locked_until = NULL,
         lock_trigger = NULL, lock_scope = NULL, updated_at = ?
     WHERE locked_by IS NOT NULL AND locked_until <= ?

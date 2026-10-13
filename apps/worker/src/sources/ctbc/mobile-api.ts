@@ -1,7 +1,13 @@
 import type { SyncResult } from "../types";
+import { reportSyncProgress } from "../sync-progress";
 
 import forge from "node-forge";
-import { parseCtbcData, type CtbcConfig, type CtbcPayloads } from "./protocol";
+import {
+  parseCtbcData,
+  type CtbcConfig,
+  type CtbcPayloads,
+  type CtbcPendingSession,
+} from "./protocol";
 import { BANK_SYNC_MONTHS } from "../sync-window";
 import { isNoCreditCardMessage } from "../credit-card-status";
 
@@ -10,17 +16,25 @@ const CTBC_APPLICATION = "EBMW_Adapter";
 const CTBC_RESOURCE_ENDPOINT = `${CTBC_IMP_ORIGIN}/api/adapters/${CTBC_APPLICATION}/resource/ebmwResource`;
 // Google Play Taiwan latest version, verified on 2026-10-10.
 const CTBC_APP_VERSION = "5.2.26";
-const CTBC_WEB_VERSION = "20260722182433427";
+// UtilsService.getWebVersion() in the public Android 5.2.26 package.
+const CTBC_WEB_VERSION = "(0812)";
+const CTBC_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 15; Pixel 8 Build/AP3A.241005.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.6723.58 Mobile Safari/537.36";
 // MobileFirst client-credential value shipped in the public Android package.
 const CTBC_PUBLIC_CLIENT_TOKEN = "2ae74c0ad7a14739a2aab7340616d70e";
 const REQUEST_TIMEOUT_MS = 45_000;
 const MAX_PAGES = 20;
+const PASSWORD_CHANGE_MESSAGE =
+  "中國信託要求變更密碼，自動同步已暫停。請至官方 App 完成變更，再更新這裡的密碼並手動同步。";
 
 const CTBC_PIN_RSA_EXPONENT = "9719";
 const CTBC_PIN_RSA_MODULUS =
   "DF63FFC2F35068BA9A964D234C3400E6394148BC69DF0DD8257340747AD73BF8514C76254F5BEA223BFF76B63840034518E0FA0A1E1905129EC69203A0873A63E5238FFE538DBEFBB64F9318C0BEEF75595DE991E004213B7FE9DA62229BDA1722B45ABAF906F26CF6D88B5BE8F18C26FCA630C6813B0D370E64E1C8D80A790F936C064A5620BFA2C6EE4B5BB962F7703A258028D53923866E43C98C36758262D6DE9D02DECFD74B211E3233924D499B864E1CA86DF012EAFFC9933A0CD2E011843B772E53C6435F78A60437E82D1677664221D01F59797D28771B2AE207EAB00E8500AA2A4FB61FF330B59FC5B699A241D9A44139CF876A74F0DE180107D7DF";
 
 const LOGIN_RESOURCE = "/twrbm-general/ot001/010";
+const TWO_STAGE_STATUS_RESOURCE = "/twrbm-general/ot001/002";
+const TWO_STAGE_EMAIL_RESOURCE = "/twrbm-general/ot001/003";
+const TWO_STAGE_EMAIL_VERIFY_RESOURCE = "/twrbm-general/ot001/004";
 const LOGOUT_RESOURCE = "/twrbm-general/ot002/010";
 const DEPOSIT_OVERVIEW_RESOURCE = "/twrbm-deposit/qu001/010";
 const DEPOSIT_TRANSACTIONS_INIT_RESOURCE = "/twrbm-deposit/qu002/010";
@@ -48,6 +62,35 @@ export class CtbcVerificationRequiredError extends Error {
     this.name = "CtbcVerificationRequiredError";
   }
 }
+
+export class CtbcTwoStageRequiredError extends CtbcVerificationRequiredError {
+  constructor(readonly method: "app" | "email") {
+    super(
+      method === "app"
+        ? "請在已綁定的中國信託 App 確認這次登入，再按「我已確認，繼續同步」；也可改用 Email 驗證。"
+        : "請輸入中國信託寄送的 Email 驗證碼，接續完成這次登入。",
+    );
+    this.name = "CtbcTwoStageRequiredError";
+  }
+}
+
+export class CtbcVerificationExpiredError extends CtbcVerificationRequiredError {
+  constructor() {
+    super("中國信託登入驗證已過期或未獲核准，請重新開始驗證。");
+    this.name = "CtbcVerificationExpiredError";
+  }
+}
+
+export type CtbcSyncOverrides = {
+  verification?: "check" | "email" | "restart";
+  otp?: string;
+};
+
+type CtbcConnectorOptions = {
+  allowInteractiveVerification?: boolean;
+  onDeviceSeed?: (seed: string) => Promise<void>;
+  onPendingSession?: (session: CtbcPendingSession | undefined) => Promise<void>;
+};
 
 export class CtbcConnectionError extends Error {
   constructor(message: string) {
@@ -133,6 +176,7 @@ export function classifyCtbcError(
 
 export function createCtbcConnector(
   fetcher: CtbcFetch = globalThis.fetch.bind(globalThis),
+  options: CtbcConnectorOptions = {},
 ) {
   return {
     id: "ctbc" as const,
@@ -141,14 +185,30 @@ export function createCtbcConnector(
     async sync(
       config: CtbcConfig,
       _cursor?: string,
+      overrides: CtbcSyncOverrides = {},
     ): Promise<SyncResult<never>> {
       const credentials = requireCtbcCredentials(config);
-      const session = new CtbcMobileSession(fetcher);
-      let loggedIn = false;
+      const session = new CtbcMobileSession(
+        fetcher,
+        config.deviceCode ?? crypto.randomUUID(),
+        config.deviceSeed ?? config.pendingSession?.seed,
+        options,
+      );
       try {
-        await session.bootstrap();
-        await session.login(credentials);
-        loggedIn = true;
+        if (overrides.verification === "restart") {
+          if (!options.allowInteractiveVerification)
+            throw new CtbcVerificationRequiredError("請手動重新開始中信驗證。");
+          await options.onPendingSession?.(undefined);
+        } else if (config.pendingSession) {
+          await session.resumeLogin(config.pendingSession, overrides);
+        } else if (overrides.verification || overrides.otp) {
+          throw new CtbcVerificationExpiredError();
+        }
+        if (!session.isLoggedIn) {
+          await session.bootstrap();
+          await session.login(credentials);
+        }
+        reportSyncProgress("fetching");
 
         const depositOverview = await session.resource(
           DEPOSIT_OVERVIEW_RESOURCE,
@@ -195,16 +255,15 @@ export function createCtbcConnector(
       } catch (error) {
         throw classifyCtbcError(error);
       } finally {
-        if (loggedIn) await session.logout();
+        await session.logout();
       }
     },
   };
 }
 
 class CtbcMobileSession {
-  private readonly deviceCode = crypto.randomUUID();
-  private readonly deviceIxd = this.deviceCode.replace(/-/g, "");
-  private readonly clientNo = Date.now().toString();
+  private readonly deviceIxd: string;
+  private clientNo = Date.now().toString();
   private accessToken = "";
   private xAuthToken = "";
   private transactionToken = "mfpInit";
@@ -212,9 +271,21 @@ class CtbcMobileSession {
   private loggedIn = false;
   private httpStatus: number | null = null;
   private loginAttempt = 0;
-  private loginConfirmationType: "initial" | "device" | "duplicate" = "initial";
+  private loginConfirmationType: "initial" | "duplicate" = "initial";
 
-  constructor(private readonly fetcher: CtbcFetch) {}
+  constructor(
+    private readonly fetcher: CtbcFetch,
+    private readonly deviceCode: string,
+    deviceSeed: string | undefined,
+    private readonly options: CtbcConnectorOptions,
+  ) {
+    this.deviceIxd = deviceCode.replace(/-/g, "");
+    this.seed = deviceSeed ?? "";
+  }
+
+  get isLoggedIn() {
+    return this.loggedIn;
+  }
 
   async bootstrap() {
     const tokenUrl = new URL(`${CTBC_IMP_ORIGIN}/oauth/token`);
@@ -257,6 +328,13 @@ class CtbcMobileSession {
       throw new CtbcConnectionError("中國信託行動銀行安全連線失敗。");
     }
     this.updateSession(handshake);
+    // The official App restores seed before the handshake, and only saves the
+    // returned seed when none was stored. Keeping the mobile identity does not
+    // enroll this client as a bound phone or a trusted web browser.
+    if (!this.seed) {
+      this.seed = stringValue(responseData(handshake).seed);
+      if (this.seed) await this.options.onDeviceSeed?.(this.seed);
+    }
   }
 
   async login(credentials: CtbcCredentials) {
@@ -269,28 +347,38 @@ class CtbcMobileSession {
       isMvpApp: false,
       isCoverApp: false,
       custSeqFIDO: "",
+      // OT044's prepareLoginRq/doLogin declares support for the new login
+      // protocol here; the envelope's appVer alone is not equivalent.
+      version: CTBC_APP_VERSION,
+      twoStageVerify: true,
+      userAgent: CTBC_USER_AGENT,
       deviceBindBlackList: "Y",
+      checkDeviceShare: "Y",
       userId: encryptCtbcPin(credentials.account),
       pin: encryptCtbcPin(credentials.password),
     };
-    let response = await this.resource(LOGIN_RESOURCE, loginRequest);
+    await this.finishLogin(
+      await this.resource(LOGIN_RESOURCE, loginRequest),
+      loginRequest,
+    );
+  }
 
-    // The official App presents these as confirmation dialogs, then resends
-    // the identical encrypted login body with the server timestamp. Scheduled
-    // sync opts into the same confirmation so an abandoned prior session or a
-    // fresh ephemeral Worker device does not permanently block automation.
+  private async finishLogin(response: JsonRecord, loginRequest: JsonRecord) {
+    // Both password login and TWO_STAGE_VERIFY may need duplicate-login
+    // confirmation. Continue with the same login request and session.
+    // Blacklisted/shared-device confirmations still require the official App.
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (
+        isVerificationResponse(response) ||
+        responseData(response).forcePwdChange != null ||
+        hasText(responseData(response).deviceBindBlackListCheckTimestamp)
+      )
+        break;
       const data = responseData(response);
-      const deviceTimestamp = stringValue(
-        data.deviceBindBlackListCheckTimestamp,
-      ).trim();
       const duplicateTimestamp = stringValue(
         data.dupLoginCheckTimestamp,
       ).trim();
-      if (deviceTimestamp) {
-        loginRequest.deviceBindBlackListCheckTimestamp = deviceTimestamp;
-        this.loginConfirmationType = "device";
-      } else if (duplicateTimestamp) {
+      if (duplicateTimestamp) {
         loginRequest.dupLoginCheckTimestamp = duplicateTimestamp;
         this.loginConfirmationType = "duplicate";
       } else {
@@ -300,11 +388,41 @@ class CtbcMobileSession {
     }
 
     const data = responseData(response);
+    if (data.forcePwdChange != null) {
+      // The bank has authenticated this session but requires a password change
+      // before using it. Stop account queries and close it in finally.
+      this.loggedIn = true;
+      throw new CtbcVerificationRequiredError(PASSWORD_CHANGE_MESSAGE);
+    }
+
+    if (
+      data.isTwoStageLogin === true &&
+      !hasText(data.dupLoginCheckTimestamp) &&
+      !hasText(data.deviceBindBlackListCheckTimestamp) &&
+      !hasText(data.verifySharedDeviceTimestamp) &&
+      !hasContactVerification(data) &&
+      !containsVerificationFlag(data) &&
+      (this.options.allowInteractiveVerification ||
+        this.options.onPendingSession)
+    ) {
+      const method =
+        hasText(data.twoStageVerifyEmail) &&
+        hasText(data.twoStageVerifyEmailAuthId)
+          ? "email"
+          : "app";
+      await this.savePendingLogin(
+        loginRequest,
+        method,
+        verificationExpiresAt(data),
+      );
+      throw new CtbcTwoStageRequiredError(method);
+    }
+
     if (
       data.needBindDevice === true ||
       hasText(data.dupLoginCheckTimestamp) ||
       hasText(data.deviceBindBlackListCheckTimestamp) ||
-      containsVerificationFlag(data)
+      isVerificationResponse(response)
     ) {
       console.warn(
         JSON.stringify({
@@ -313,10 +431,109 @@ class CtbcMobileSession {
         }),
       );
       throw new CtbcVerificationRequiredError(
-        "中國信託要求裝置、重複登入或一次性密碼確認，請先至官方 App 完成驗證。",
+        "中國信託要求裝置、兩階段登入或一次性密碼驗證，目前無法自動完成；請先使用官方 App。",
       );
     }
     this.loggedIn = true;
+    await this.options.onPendingSession?.(undefined);
+  }
+
+  async resumeLogin(pending: CtbcPendingSession, overrides: CtbcSyncOverrides) {
+    if (!this.options.allowInteractiveVerification) {
+      throw new CtbcVerificationRequiredError(
+        "中國信託需要手動完成登入驗證，自動同步已暫停。",
+      );
+    }
+    if (Date.parse(pending.expiresAt) <= Date.now())
+      throw new CtbcVerificationExpiredError();
+    if (!overrides.verification && !overrides.otp)
+      throw new CtbcTwoStageRequiredError(pending.method);
+
+    this.clientNo = pending.clientNo;
+    this.accessToken = pending.accessToken;
+    this.xAuthToken = pending.xAuthToken;
+    this.transactionToken = pending.transactionToken;
+    this.seed = pending.seed;
+
+    if (overrides.verification === "email") {
+      if (pending.method === "email")
+        throw new CtbcTwoStageRequiredError("email");
+      const response = await this.resource(TWO_STAGE_EMAIL_RESOURCE, {
+        genType: "2",
+      });
+      const data = responseData(response);
+      if (
+        !hasText(data.twoStageVerifyEmail) ||
+        !hasText(data.twoStageVerifyEmailAuthId)
+      )
+        throw new CtbcVerificationExpiredError();
+      await this.savePendingLogin(
+        pending.loginRequest,
+        "email",
+        verificationExpiresAt(data),
+      );
+      throw new CtbcTwoStageRequiredError("email");
+    }
+
+    if (overrides.otp) {
+      if (pending.method !== "email" || !/^\d{4}$/.test(overrides.otp))
+        throw new CtbcVerificationRequiredError(
+          "請輸入 Email 中的四位數字驗證碼。",
+        );
+      const response = await this.resource(TWO_STAGE_EMAIL_VERIFY_RESOURCE, {
+        twoStageVerifyEmailAuthCode: overrides.otp,
+      });
+      if (
+        stringValue(response.code) !== "0000" &&
+        stringValue(response.statusCode) !== "0000" &&
+        response.success !== true
+      )
+        throw new CtbcVerificationExpiredError();
+    } else {
+      if (pending.method !== "app" || overrides.verification !== "check")
+        throw new CtbcTwoStageRequiredError(pending.method);
+      const data = responseData(
+        await this.resource(TWO_STAGE_STATUS_RESOURCE, {}),
+      );
+      if (data.keepListen === true) {
+        await this.savePendingLogin(
+          pending.loginRequest,
+          "app",
+          pending.expiresAt,
+        );
+        throw new CtbcTwoStageRequiredError("app");
+      }
+      if (data.keepListen !== false || data.twoStageVerifySuccess !== true)
+        throw new CtbcVerificationExpiredError();
+    }
+
+    // OT044 continues with the original encrypted PINs and the same session.
+    // An approval never causes another fresh password login.
+    const loginRequest = {
+      ...pending.loginRequest,
+      loginType: "TWO_STAGE_VERIFY",
+    };
+    await this.finishLogin(
+      await this.resource(LOGIN_RESOURCE, loginRequest),
+      loginRequest,
+    );
+  }
+
+  private async savePendingLogin(
+    loginRequest: JsonRecord,
+    method: CtbcPendingSession["method"],
+    expiresAt: string,
+  ) {
+    await this.options.onPendingSession?.({
+      clientNo: this.clientNo,
+      accessToken: this.accessToken,
+      xAuthToken: this.xAuthToken,
+      transactionToken: this.transactionToken,
+      seed: this.seed,
+      loginRequest,
+      method,
+      expiresAt,
+    });
   }
 
   async logout() {
@@ -389,6 +606,7 @@ class CtbcMobileSession {
     return {
       Accept: "application/json",
       "Content-Type": "application/json",
+      "User-Agent": CTBC_USER_AGENT,
       Authorization: `Bearer ${this.accessToken}`,
     };
   }
@@ -451,12 +669,15 @@ class CtbcMobileSession {
   private updateSession(response: JsonRecord) {
     const nextToken = stringValue(response.token);
     if (nextToken) this.transactionToken = nextToken;
-    const nextSeed = stringValue(responseData(response).seed);
-    if (nextSeed) this.seed = nextSeed;
   }
 
   private assertResourceSuccess(response: JsonRecord, resource: string) {
     const isLogin = resource === LOGIN_RESOURCE;
+    const isTwoStage = [
+      TWO_STAGE_STATUS_RESOURCE,
+      TWO_STAGE_EMAIL_RESOURCE,
+      TWO_STAGE_EMAIL_VERIFY_RESOURCE,
+    ].includes(resource);
     const code = stringValue(response.code);
     const statusCode = stringValue(response.statusCode);
     const system = stringValue(response.sys || response.systemId);
@@ -475,6 +696,7 @@ class CtbcMobileSession {
       return;
     if (
       !isLogin &&
+      !isTwoStage &&
       (code === "8888" || (system === "ESB" && code === "9201"))
     ) {
       return;
@@ -494,6 +716,12 @@ class CtbcMobileSession {
         ...(isLogin ? this.loginDiagnostics(response) : {}),
       }),
     );
+    if (isLogin && responseData(response).forcePwdChange != null) {
+      throw new CtbcVerificationRequiredError(PASSWORD_CHANGE_MESSAGE);
+    }
+    if (isTwoStage) {
+      throw new CtbcVerificationExpiredError();
+    }
     if (isVerificationResponse(response)) {
       throw new CtbcVerificationRequiredError(
         "中國信託登入需要重新驗證，請先至官方 App 完成驗證。",
@@ -526,9 +754,13 @@ class CtbcMobileSession {
       verificationFlags: {
         deviceConfirmation: hasText(data.deviceBindBlackListCheckTimestamp),
         duplicateLoginConfirmation: hasText(data.dupLoginCheckTimestamp),
+        sharedDeviceConfirmation: hasText(data.verifySharedDeviceTimestamp),
+        contactVerification: hasContactVerification(data),
         bindDevice: containsVerificationFlag(data, /binddevice/i),
         otp: containsVerificationFlag(data, /otp/i),
-        twoStage: containsVerificationFlag(data, /twostage/i),
+        twoStage:
+          data.isTwoStageLogin === true ||
+          containsVerificationFlag(data, /twostage/i),
         verificationRequired: isVerificationResponse(response),
       },
     };
@@ -824,7 +1056,27 @@ function isVerificationResponse(response: JsonRecord) {
   }
   // Login failures and descriptions mentioning login can also mean maintenance.
   // Require a verification signal before asking the user to verify in the App.
-  return containsVerificationFlag(responseData(response));
+  const data = responseData(response);
+  return (
+    data.forcePwdChange != null ||
+    data.isTwoStageLogin === true ||
+    hasText(data.deviceBindBlackListCheckTimestamp) ||
+    hasText(data.verifySharedDeviceTimestamp) ||
+    hasContactVerification(data) ||
+    containsVerificationFlag(data)
+  );
+}
+
+function hasContactVerification(data: JsonRecord) {
+  // OT044 interrupts login for EMAIL_VERIFY (11) and MOBILE_VERIFY (21).
+  const verification = recordValue(data.verifyData).verify;
+  return verification === "11" || verification === "21";
+}
+
+function verificationExpiresAt(data: JsonRecord) {
+  const seconds = numberValue(data.twoStageCountDownSec) ?? 300;
+  if (seconds <= 0) throw new CtbcVerificationExpiredError();
+  return new Date(Date.now() + Math.min(seconds, 300) * 1000).toISOString();
 }
 
 function hasText(value: unknown) {

@@ -21,6 +21,7 @@ import {
   safelySendSyncNotification,
 } from "../../features/notifications/service";
 import { claimCompletedDefaultScheduleBatch } from "../../features/sync/scheduling/batch-repository";
+import { classifySyncError } from "../../features/sync/error-response";
 import {
   acquireEinvoiceRunChunkLease,
   claimEinvoiceRunItems,
@@ -396,7 +397,10 @@ export async function failEinvoiceSyncRun(
     !forceFailed && isEinvoiceUserActionError(error)
       ? "needs_user_action"
       : "failed";
-  return finalizeEinvoiceRun(env, run, status, safeErrorMessage(error));
+  return finalizeEinvoiceRun(env, run, status, {
+    message: safeErrorMessage(error),
+    code: classifySyncError(error).code,
+  });
 }
 
 export async function cancelQueuedEinvoiceSyncRun(
@@ -480,10 +484,11 @@ async function finalizeEinvoiceRun(
   env: Env,
   run: EinvoiceRunRow,
   status: SyncNotificationStatus,
-  error: string | null = null,
+  failure: { message: string; code: string } | null = null,
   chunkOwner?: string,
   signal?: AbortSignal,
 ) {
+  const error = failure?.message ?? null;
   const job = await findSyncJob(env.DB, "einvoice", "all");
   signal?.throwIfAborted();
   if (!job) {
@@ -538,6 +543,7 @@ async function finalizeEinvoiceRun(
       `UPDATE sync_jobs
        SET last_status = ?,
            last_error = ?,
+           last_error_code = ?,
            last_run_at = ?,
            last_success_at = CASE WHEN ? = 'success' THEN ? ELSE last_success_at END,
            next_run_at = ?,
@@ -550,6 +556,7 @@ async function finalizeEinvoiceRun(
     ).bind(
       status,
       error,
+      failure?.code ?? null,
       nowIso,
       status,
       nowIso,
@@ -633,8 +640,12 @@ async function finalizeEinvoiceRun(
       run.scheduled_batch_id,
     );
     if (summary) await safelySendScheduledSyncSummary(env, summary);
-  } else if (run.trigger === "scheduled") {
-    await safelySendSyncNotification(env, { connectorId: "einvoice", status });
+  } else {
+    await safelySendSyncNotification(env, {
+      connectorId: "einvoice",
+      status,
+      trigger: run.trigger,
+    });
   }
   return true;
 }

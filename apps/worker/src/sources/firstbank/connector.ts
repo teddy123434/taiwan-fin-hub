@@ -21,6 +21,7 @@ import {
   type FirstbankPayloads,
 } from "./protocol";
 import { isNoCreditCardMessage } from "../credit-card-status";
+import { reportSyncProgress } from "../sync-progress";
 
 const ORIGIN = "https://ibank.firstbank.com.tw";
 const FRAME_URL = `${ORIGIN}/NetBank/frame.html`;
@@ -390,6 +391,7 @@ export function createFirstbankConnector(
           await loginWithOcr(page, config, recognizeCaptcha, initialCaptcha);
         }
         authenticated = true;
+        reportSyncProgress("fetching");
 
         await ensureTraditionalChineseUi(page);
         const payloads = await collectFirstbankPayloads(page);

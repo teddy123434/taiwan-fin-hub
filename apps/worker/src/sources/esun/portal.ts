@@ -9,7 +9,7 @@ const IESC_ORIGIN = "https://iesc.esunbank.com";
 const CARD_OVERVIEW_INIT_PATH = "mib-ccm-portal/ccmB1/ccmB1001/home/init";
 const CARD_OVERVIEW_PATH = "mib-ccm-portal/ccmB1/ccmB1001/home/getCardOverview";
 const DEPOSIT_TASK_INIT_PATH = "mib-ctw-portal/ctw01/ctw01002/home/init";
-const NO_FOREIGN_ACCOUNT_RESULT_CODE = "S001";
+const NO_DEPOSIT_ACCOUNT_RESULT_CODE = "S001";
 const TW_DEPOSIT_PREQUERY_PATH =
   "mib-ctw-portal/ctw01/ctw01002/home/preQueryTWTransactionDetail";
 const FR_DEPOSIT_PREQUERY_PATH =
@@ -620,8 +620,12 @@ async function loadDeposits(
   const firstRaw = await api.postPortal(options.prequeryPath, {
     account: null,
   });
-  if (options.kind === "fr" && isNoForeignAccount(firstRaw)) {
-    logEsunStep("foreign-deposit-not-held");
+  if (isNoDepositAccount(firstRaw, options.kind)) {
+    logEsunStep(
+      options.kind === "fr"
+        ? "foreign-deposit-not-held"
+        : "twd-deposit-not-held",
+    );
     return [];
   }
   assertPortalOk(firstRaw, "deposit-prequery");
@@ -646,16 +650,20 @@ async function loadDeposits(
 }
 
 /**
- * E.SUN uses S001 for several notice pages, so only its "no foreign account"
- * wording counts; other S001 notices still fail the sync.
+ * E.SUN uses S001 for several notice pages, so only its "no TWD account" or
+ * "no foreign account" wording for the queried kind counts; other S001
+ * notices still fail the sync.
  */
-function isNoForeignAccount(value: unknown) {
+function isNoDepositAccount(value: unknown, kind: "tw" | "fr") {
   const envelope = value as PortalEnvelope<unknown> & {
     resultDescription?: string;
   };
   return (
-    envelope?.resultCode === NO_FOREIGN_ACCOUNT_RESULT_CODE &&
-    /查無外幣帳號|尚未開立外幣帳戶/.test(envelope.resultDescription ?? "")
+    envelope?.resultCode === NO_DEPOSIT_ACCOUNT_RESULT_CODE &&
+    (kind === "fr"
+      ? /查無外幣帳號|尚未開立外幣帳戶/
+      : /查無臺幣帳號|尚未開立臺幣帳戶/
+    ).test(envelope.resultDescription ?? "")
   );
 }
 

@@ -21,11 +21,13 @@ import {
   normalizeBankTransactionDetails,
   type BankTransactionDetail,
 } from "./epassbook-client";
-import type {
-  SyncNewRecordCounts,
-  SyncNotificationStatus,
-} from "@taiwan-fin-hub/shared";
-import { getConnectorSettings, nextSyncRunAt } from "../../db";
+import type { SyncNewRecordCounts } from "@taiwan-fin-hub/shared";
+import {
+  getConnectorSettings,
+  nextSyncRunAt,
+  type SyncFailureInput,
+} from "../../db";
+import { syncFailureInput } from "../../features/sync/error-response";
 import { configEncryptionKey } from "../../platform/config";
 import { decryptJson, encryptJson } from "../../platform/crypto";
 import type { Env } from "../../platform/env";
@@ -74,7 +76,6 @@ import {
   connectorStateStatement,
 } from "../../features/sync/connector-repository";
 import {
-  isUserActionError,
   NeedsUserActionError,
   safeErrorMessage,
   SyncAlreadyRunningError,
@@ -124,8 +125,9 @@ export type StartTdccSyncRunResult = {
   created: boolean;
 };
 
-/** Start a durable TDCC run. Manual starts initialize the bounded snapshot
- * inline so OTP/device errors retain the existing immediate UX. */
+/** Start a durable TDCC run. Only a manual OTP submission initializes inline,
+ * so an invalid OTP is reported immediately; other starts initialize in the
+ * Queue and record OTP requirements on the sync job. */
 export async function startTdccSyncRun(
   env: Env,
   input: {
@@ -223,7 +225,7 @@ export async function startTdccSyncRun(
               : null),
           "tdcc",
         );
-        if (input.trigger === "manual") {
+        if (input.trigger === "manual" && input.overrides?.otp) {
           await initializeTdccRun(syncEnv, run, config, settings.sync_cursor);
         }
       });
@@ -353,10 +355,12 @@ export async function failTdccSyncRun(
     return false;
   if (!(await holdTdccRunLock(env.DB, run.id, run.trigger, run.scope)))
     return false;
-  const status: Exclude<SyncNotificationStatus, "success"> =
-    !forceFailed && isUserActionError(error) ? "needs_user_action" : "failed";
-  const errorMessage = safeErrorMessage(error);
-  return finishTdccJob(env, run, status, errorMessage, emptyNewRecords());
+  return finishTdccJob(
+    env,
+    run,
+    syncFailureInput(error, { forceFailed }),
+    emptyNewRecords(),
+  );
 }
 
 export async function cancelQueuedTdccSyncRun(
@@ -672,7 +676,7 @@ async function promoteTdccRun(env: Env, run: TdccRunRow) {
     finalizeStatements.push(
       env.DB.prepare(
         `UPDATE sync_jobs
-           SET last_status = 'success', last_error = NULL,
+           SET last_status = 'success', last_error = NULL, last_error_code = NULL,
                last_run_at = ?, last_success_at = ?, next_run_at = ?,
                updated_at = ?
            WHERE id = ? AND locked_by = ?`,
@@ -761,10 +765,11 @@ async function finishTdccJobAfterPromotion(
       run.scheduled_batch_id,
     );
     if (summary) await safelySendScheduledSyncSummary(env, summary);
-  } else if (run.trigger === "scheduled") {
+  } else {
     await safelySendSyncNotification(env, {
       connectorId: "tdcc",
       status: "success",
+      trigger: run.trigger,
     });
   }
 }
@@ -772,10 +777,10 @@ async function finishTdccJobAfterPromotion(
 async function finishTdccJob(
   env: Env,
   run: TdccRunRow,
-  status: Exclude<SyncNotificationStatus, "success">,
-  error: string,
+  failure: SyncFailureInput,
   newRecords: SyncNewRecordCounts,
 ) {
+  const { status, errorMessage: error } = failure;
   const job = await findSyncJob(env.DB, "tdcc", "all");
   if (!job) return false;
   const now = new Date().toISOString();
@@ -797,11 +802,21 @@ async function finishTdccJob(
     ),
     env.DB.prepare(
       `UPDATE sync_jobs
-         SET last_status = ?, last_error = ?, last_run_at = ?, next_run_at = ?,
+         SET last_status = ?, last_error = ?, last_error_code = ?,
+             last_run_at = ?, next_run_at = ?,
              locked_by = NULL, locked_until = NULL,
              lock_trigger = NULL, lock_scope = NULL, updated_at = ?
          WHERE id = ? AND locked_by = ?`,
-    ).bind(status, error, now, nextRunAt, now, job.id, run.id),
+    ).bind(
+      status,
+      error,
+      failure.errorCode ?? null,
+      now,
+      nextRunAt,
+      now,
+      job.id,
+      run.id,
+    ),
   ];
   if (run.scheduled_batch_id) {
     statements.push(
@@ -845,8 +860,12 @@ async function finishTdccJob(
       run.scheduled_batch_id,
     );
     if (summary) await safelySendScheduledSyncSummary(env, summary);
-  } else if (run.trigger === "scheduled") {
-    await safelySendSyncNotification(env, { connectorId: "tdcc", status });
+  } else {
+    await safelySendSyncNotification(env, {
+      connectorId: "tdcc",
+      status,
+      trigger: run.trigger,
+    });
   }
   return true;
 }

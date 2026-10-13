@@ -1,4 +1,5 @@
 import type { SyncResult } from "../types";
+import { reportSyncProgress } from "../sync-progress";
 
 import forge from "node-forge";
 import {
@@ -202,6 +203,7 @@ export function createObankConnector(
         }
 
         await session.login(credentials, captcha, options);
+        reportSyncProgress("fetching");
         const demandDeposits = await session.secureResource(
           DEMAND_DEPOSIT_RESOURCE,
           {

@@ -1,5 +1,13 @@
 import type { Env } from "../../platform/env";
-import { syncLockGuardStatement, type SyncLockOwner } from "../../db/sync-jobs";
+import {
+  syncLockGuardStatement,
+  updateSyncJobLockPhase,
+  type SyncLockOwner,
+} from "../../db/sync-jobs";
+import {
+  runWithSyncProgress,
+  type SyncProgressPhase,
+} from "../../sources/sync-progress";
 import { startSyncLockHeartbeat, SYNC_MAX_DURATION_MS } from "./lock";
 
 export type SyncEnv = Env & { syncSignal?: AbortSignal };
@@ -72,6 +80,31 @@ export function createSyncExecution(
       : env.BROWSER,
     syncSignal: signal,
   };
+  // 電子發票與集保的進度由 durable run 保存，不寫入 connector lock。
+  let reportedPhase: SyncProgressPhase | undefined;
+  let progressWrite = Promise.resolve();
+  const reportProgress = (phase: SyncProgressPhase) => {
+    if (options.chunk || signal.aborted || phase === reportedPhase) return;
+    reportedPhase = phase;
+    progressWrite = progressWrite
+      .then(() =>
+        updateSyncJobLockPhase(env.DB, {
+          lockRowId: owner.lockRowId,
+          runId: owner.runId,
+          phase,
+        }),
+      )
+      .catch((error: unknown) => {
+        console.warn(
+          JSON.stringify({
+            event: "sync_progress_update_failed",
+            lockRowId: owner.lockRowId,
+            phase,
+            errorType: error instanceof Error ? error.name : "UNKNOWN_ERROR",
+          }),
+        );
+      });
+  };
   return {
     env: scopedEnv,
     async run<T>(task: (env: SyncEnv) => Promise<T>): Promise<T> {
@@ -83,7 +116,12 @@ export function createSyncExecution(
       });
       try {
         return await Promise.race([
-          Promise.resolve().then(() => task(scopedEnv)),
+          Promise.resolve().then(() =>
+            runWithSyncProgress(reportProgress, () => {
+              reportProgress("login");
+              return task(scopedEnv);
+            }),
+          ),
           aborted,
         ]);
       } finally {
