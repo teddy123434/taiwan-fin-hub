@@ -568,6 +568,30 @@ function promotionStatement(
             ELSE COALESCE(excluded.is_paid, credit_card_bills.is_paid)
           END`;
       }
+      if (entityType === "bank_account" && column === "currency")
+        return "currency = COALESCE(NULLIF(excluded.currency, ''), bank_accounts.currency)";
+      if (
+        entityType === "bank_account" &&
+        [
+          "account_name",
+          "loan_category",
+          "loan_interest_rate",
+          "opened_date",
+          "maturity_date",
+        ].includes(column)
+      )
+        return `${column} = COALESCE(excluded.${column}, bank_accounts.${column})`;
+      if (
+        entityType === "bank_balance_snapshot" &&
+        [
+          "payment_due_date",
+          "loan_payment_amount",
+          "loan_payment_status",
+          "loan_installments_paid",
+          "loan_installments_total",
+        ].includes(column)
+      )
+        return `${column} = COALESCE(excluded.${column}, bank_balance_snapshots.${column})`;
       if (entityType !== "bank_transaction")
         return `${column} = excluded.${column}`;
       if (column === "transfer_peer_id")

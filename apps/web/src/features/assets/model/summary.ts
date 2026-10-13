@@ -27,7 +27,7 @@ export interface InstitutionAssetGroup {
   assetTotalTwd: number;
   debtTotalTwd: number;
   loanDebtTotalTwd: number;
-  loanCategoryTotals: { housing: number; other: number };
+  loanCategoryTotals: { housing: number; personal: number; other: number };
   hasUnknownCardBalance: boolean;
   hasUnknownLoanBalance: boolean;
   foreignCurrencies: string[];
@@ -188,6 +188,12 @@ export function calculateAssetSummary({
         loanCategoryTotals: {
           housing: loans
             .filter((loan) => loan.loanCategory === "housing")
+            .reduce(
+              (sum, loan) => sum - toTwd(loan.balance ?? 0, loan.currency),
+              0,
+            ),
+          personal: loans
+            .filter((loan) => loan.loanCategory === "personal")
             .reduce(
               (sum, loan) => sum - toTwd(loan.balance ?? 0, loan.currency),
               0,

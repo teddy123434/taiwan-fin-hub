@@ -88,7 +88,7 @@ export function bankAccountRecord(
       account_type: account.accountType ?? null,
       loan_category: account.loanCategory ?? null,
       loan_interest_rate: account.loanInterestRate ?? null,
-      currency: account.currency || "TWD",
+      currency: account.currency ?? "TWD",
       credit_limit: account.creditLimit ?? null,
       opened_date: account.openedDate ?? null,
       maturity_date: account.maturityDate ?? null,

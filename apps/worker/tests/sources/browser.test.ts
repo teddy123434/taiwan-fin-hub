@@ -516,13 +516,14 @@ describe("Browser Run 登入前復原與用量限制", () => {
   );
 
   it.each(["limits", "http_429"])(
-    "首次取得不足保留原政策，不在登入前等待（%s）",
+    "首次取得遇到限流，等待後重查額度並繼續登入準備（%s）",
     async (mode) => {
+      const waitMs = mode === "limits" ? 20_000 : 25_000;
       if (mode === "limits") {
-        vi.mocked(puppeteer.limits).mockResolvedValue({
+        vi.mocked(puppeteer.limits).mockResolvedValueOnce({
           ...allowed,
           allowedBrowserAcquisitions: 0,
-          timeUntilNextAllowedBrowserAcquisition: 20_000,
+          timeUntilNextAllowedBrowserAcquisition: waitMs,
         });
       } else {
         acquireFromResponses([
@@ -530,17 +531,63 @@ describe("Browser Run 登入前復原與用量限制", () => {
             status: 429,
             headers: { "Retry-After": "25" },
           }),
+          new Response(null, { status: 200 }),
         ]);
       }
-      const prepare = vi.fn();
-      await expect(
-        prepareBrowserLoginWithRetry({ binding, connectorId: "bank", prepare }),
-      ).rejects.toBeInstanceOf(BrowserRunCapacityError);
+      const prepare = vi.fn().mockResolvedValue("ready");
+      const pending = prepareBrowserLoginWithRetry({
+        binding,
+        connectorId: "bank",
+        prepare,
+      });
+      await vi.advanceTimersByTimeAsync(waitMs - 1);
       expect(puppeteer.launch).toHaveBeenCalledTimes(mode === "limits" ? 0 : 1);
       expect(prepare).not.toHaveBeenCalled();
-      expect(logEntries("browser_login_acquisition_wait")).toHaveLength(0);
+      expect(puppeteer.limits).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toMatchObject({ value: "ready" });
+      expect(puppeteer.launch).toHaveBeenCalledTimes(mode === "limits" ? 1 : 2);
+      expect(puppeteer.limits).toHaveBeenCalledTimes(2);
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(logEntries("browser_login_acquisition_wait")[0]).toMatchObject({
+        attempt: 1,
+        waitMs,
+      });
     },
   );
+
+  it("首次建立先回 503 再回 429，依等待時間補試且只準備登入一次", async () => {
+    acquireFromResponses([
+      new Response("service unavailable", { status: 503 }),
+      new Response("Too many requests private-token", { status: 429 }),
+      new Response(null, { status: 200 }),
+    ]);
+    const prepare = vi.fn().mockResolvedValue("ready");
+    const pending = prepareBrowserLoginWithRetry({
+      binding,
+      connectorId: "firstbank",
+      prepare,
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(prepare).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ value: "ready" });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(puppeteer.launch).toHaveBeenCalledTimes(2);
+    expect(puppeteer.limits).toHaveBeenCalledTimes(2);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(logEntries("browser_login_acquisition_wait")[0]).toMatchObject({
+      connectorId: "firstbank",
+      attempt: 1,
+      waitMs: 20_000,
+    });
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain(
+      "private-token",
+    );
+  });
 
   it.each(["initial", "replacement"])(
     "每日額度耗盡的 429 立即停止（%s）",
@@ -571,36 +618,43 @@ describe("Browser Run 登入前復原與用量限制", () => {
     },
   );
 
-  it("重開持續收到 429，最多三次 acquisition，沒有額外頁面重試", async () => {
-    acquireFromResponses([
-      new Response(null, { status: 200 }),
-      ...Array.from(
-        { length: 3 },
-        () => new Response("Too many requests", { status: 429 }),
-      ),
-    ]);
-    const prepare = vi
-      .fn()
-      .mockRejectedValue(new Error("net::ERR_CONNECTION_RESET"));
-    const pending = prepareBrowserLoginWithRetry({
-      binding,
-      connectorId: "bank",
-      prepare,
-    });
-    const failed = expect(pending).rejects.toMatchObject({
-      kind: "rate_limit",
-      retryAfterSeconds: 20,
-    });
-    await vi.advanceTimersByTimeAsync(40_000);
-    await failed;
-    expect(puppeteer.launch).toHaveBeenCalledTimes(4);
-    expect(prepare).toHaveBeenCalledOnce();
-    expect(logEntries("browser_login_acquisition_failed")[0]).toMatchObject({
-      attempt: 2,
-      acquisitionAttempt: 3,
-      waitedMs: 40_000,
-    });
-  });
+  it.each(["initial", "replacement"])(
+    "持續收到 429 最多三次 acquisition，沒有額外頁面重試（%s）",
+    async (mode) => {
+      acquireFromResponses([
+        ...(mode === "replacement"
+          ? [new Response(null, { status: 200 })]
+          : []),
+        ...Array.from(
+          { length: 3 },
+          () => new Response("Too many requests", { status: 429 }),
+        ),
+      ]);
+      const prepare = vi
+        .fn()
+        .mockRejectedValue(new Error("net::ERR_CONNECTION_RESET"));
+      const pending = prepareBrowserLoginWithRetry({
+        binding,
+        connectorId: "bank",
+        prepare,
+      });
+      const failed = expect(pending).rejects.toMatchObject({
+        kind: "rate_limit",
+        retryAfterSeconds: 20,
+      });
+      await vi.advanceTimersByTimeAsync(40_000);
+      await failed;
+      expect(puppeteer.launch).toHaveBeenCalledTimes(
+        mode === "initial" ? 3 : 4,
+      );
+      expect(prepare).toHaveBeenCalledTimes(mode === "initial" ? 0 : 1);
+      expect(logEntries("browser_login_acquisition_failed")[0]).toMatchObject({
+        attempt: mode === "initial" ? 1 : 2,
+        acquisitionAttempt: 3,
+        waitedMs: 40_000,
+      });
+    },
+  );
 
   it("剩餘期限不足以等 429 時立即停止，保留樂天 OCR 預算", async () => {
     const syncStartedAt = Date.now();
@@ -703,31 +757,40 @@ describe("Browser Run 登入前復原與用量限制", () => {
     expect((fetch.mock.calls[0][0] as Request).signal.aborted).toBe(true);
   });
 
-  it("等待 429 期間取消，不再查額度或重開 session", async () => {
-    const controller = new AbortController();
-    binding.syncSignal = controller.signal;
-    acquireFromResponses([
-      new Response(null, { status: 200 }),
-      new Response("Too many requests", { status: 429 }),
-    ]);
-    const prepare = vi
-      .fn()
-      .mockRejectedValue(new Error("net::ERR_CONNECTION_RESET"));
-    const pending = prepareBrowserLoginWithRetry({
-      binding,
-      connectorId: "bank",
-      prepare,
-    });
-    const reason = new Error("sync cancelled");
-    const failed = expect(pending).rejects.toBe(reason);
-    await vi.advanceTimersByTimeAsync(10_000);
-    controller.abort(reason);
-    await failed;
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(puppeteer.launch).toHaveBeenCalledTimes(2);
-    expect(puppeteer.limits).toHaveBeenCalledTimes(2);
-    expect(prepare).toHaveBeenCalledOnce();
-  });
+  it.each(["initial", "replacement"])(
+    "等待 429 期間取消，不再查額度或重開 session（%s）",
+    async (mode) => {
+      const controller = new AbortController();
+      binding.syncSignal = controller.signal;
+      acquireFromResponses([
+        ...(mode === "replacement"
+          ? [new Response(null, { status: 200 })]
+          : []),
+        new Response("Too many requests", { status: 429 }),
+      ]);
+      const prepare = vi
+        .fn()
+        .mockRejectedValue(new Error("net::ERR_CONNECTION_RESET"));
+      const pending = prepareBrowserLoginWithRetry({
+        binding,
+        connectorId: "bank",
+        prepare,
+      });
+      const reason = new Error("sync cancelled");
+      const failed = expect(pending).rejects.toBe(reason);
+      await vi.advanceTimersByTimeAsync(10_000);
+      controller.abort(reason);
+      await failed;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(puppeteer.launch).toHaveBeenCalledTimes(
+        mode === "initial" ? 1 : 2,
+      );
+      expect(puppeteer.limits).toHaveBeenCalledTimes(
+        mode === "initial" ? 1 : 2,
+      );
+      expect(prepare).toHaveBeenCalledTimes(mode === "initial" ? 0 : 1);
+    },
+  );
 
   it("同步取消會關閉進行中的 session，並停止後續嘗試", async () => {
     const controller = new AbortController();

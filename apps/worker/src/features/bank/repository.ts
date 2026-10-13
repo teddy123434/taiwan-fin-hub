@@ -146,9 +146,9 @@ export async function listBankAccounts(db: D1Database) {
       institutionName: account.institutionName,
       accountName: account.accountName,
       accountType: account.accountType,
-      loanCategory: sql<"housing" | "other" | null>`${account.loanCategory}`.as(
-        "loanCategory",
-      ),
+      loanCategory: sql<
+        "housing" | "personal" | "other" | null
+      >`${account.loanCategory}`.as("loanCategory"),
       loanInterestRate: account.loanInterestRate,
       currency: account.currency,
       openedDate: account.openedDate,

@@ -55,6 +55,7 @@ import {
   rebuildBankDepositHistory,
   dateFromIso,
 } from "../../features/net-worth/service";
+import { logSinopacSyncSummary } from "./summary-log";
 
 export type SinopacSyncOverrides = {
   captcha?: string;
@@ -134,6 +135,7 @@ export async function syncSinopac(
   console.log(
     `[sync] ${connectorId}/${scope}: starting trigger=${trigger} (cursor=${settings.sync_cursor ? "set" : "none"})`,
   );
+
   let result: Awaited<
     ReturnType<ReturnType<typeof createSinopacConnector>["sync"]>
   >;
@@ -147,6 +149,7 @@ export async function syncSinopac(
       );
     } catch (error) {
       if (!(error instanceof SinopacVerificationRequiredError)) throw error;
+
       const session = await loginSinopacWithOcr(
         env.BROWSER,
         activeConfig,
@@ -203,9 +206,19 @@ export async function syncSinopac(
   const bankBalanceSnapshots = result.bankBalanceSnapshots ?? [];
   const bankTransactions = result.bankTransactions ?? [];
   const creditCardBills = result.creditCardBills ?? [];
-  console.log(
-    `[sync] ${connectorId}/${scope}: accounts=${bankAccounts.length} snapshots=${bankBalanceSnapshots.length} transactions=${bankTransactions.length} bills=${creditCardBills.length}`,
-  );
+
+  logSinopacSyncSummary({
+    accountCount: bankAccounts.length,
+    snapshotCount: bankBalanceSnapshots.length,
+    transactionCount: bankTransactions.length,
+    billCount: creditCardBills.length,
+    loanOverviewComplete: result.loanSummary.overviewComplete,
+    loanAccountListFailures: result.loanSummary.accountListFailures,
+    loanAccountDetailFailures: result.loanSummary.accountDetailFailures,
+    loanPaymentDetailFailures: result.loanSummary.paymentDetailFailures,
+    loanAccountCount: result.loanSummary.accountCount,
+    loanSnapshotCount: result.loanSummary.snapshotCount,
+  });
 
   const now = new Date().toISOString();
   let records: SyncWriteRecord[] = [
@@ -279,10 +292,11 @@ export async function syncSinopac(
   });
   if (bankBalanceSnapshots.length > 0)
     await rebuildBankDepositHistory(env.DB, [dateFromIso(now)]);
+
   return {
     success: true,
     connectorId,
-    scope,
+    scope: SYNC_SCOPE_ALL,
     records:
       bankAccounts.length +
       bankBalanceSnapshots.length +

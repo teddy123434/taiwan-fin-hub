@@ -100,8 +100,9 @@ Protocol／client 不得依賴 Hono、D1、Worker `Env`、adapter 或 `sync.ts`�
 下一次重置的秒數。五家原有的 `puppeteer.limits` 啟動頻率預先檢查也使用共用錯誤，
 並保留當下取得的等待秒數。
 
-手動同步與驗證碼 route 對共用錯誤回應 `429 BROWSER_BUSY`；同步紀錄維持
-`failed`，排程在下一輪照常重試。銀行專屬 capacity error 只處理驗證碼作業或
+每日額度、補試耗盡或剩餘期限不足時，手動同步與驗證碼 route 對共用錯誤回應
+`429 BROWSER_BUSY`；同步紀錄維持 `failed`，排程在下一輪照常重試。
+銀行專屬 capacity error 只處理驗證碼作業或
 session 忙碌，原有專屬 API 錯誤碼仍供這些情境使用。session 重連與銀行回應不在
 上述 capacity 辨識及建立重試範圍內。
 
@@ -117,10 +118,11 @@ session 忙碌，原有專屬 API 錯誤碼仍供這些情境使用。session �
   樂天另外預留 OCR／登入時間，重試不重設整次同步期限。
 - 查詢 `puppeteer.limits` 與每次取得瀏覽器各自最多 15 秒，受整體剩餘期限限制。
   限流等待在取得操作之外計時，因此 20 秒等待不會被 15 秒取得逾時截斷。
-  首次額度不足或取得回應 `429` 保留原有忙碌政策；只有已確認關閉舊 session 的
-  重開流程會等待。每次等待後重新查詢額度，尚無額度就繼續等待至剩餘預算不足。
-  重開取得的暫時性 `429` 依 `Retry-After` 等待後重試，最多三次取得嘗試；每日額度
-  立即停止。只有建立請求明確回應 `429` 才能重試；CDP 連線失敗即使含有 `429`
+  首次取得與已確認關閉舊 session 的重開流程都會等待暫時限流。
+  每次等待後重新查詢額度，尚無額度就繼續等待至剩餘預算不足。
+  取得的暫時性 `429` 依 `Retry-After` 等待後重試（包含首次建立的 `503` 重試後收到
+  `429`），每輪最多三次取得嘗試；每日額度立即停止。
+  只有建立請求明確回應 `429` 才能重試；CDP 連線失敗即使含有 `429`
   也停止重開，避免重複建立狀態不明的 session。其他取得錯誤與取得逾時不觸發新一輪登入頁重試，未知取得
   逾時也會停止尚未發出的 HTTP 重試；遲到的 session 仍須關閉。
 - 只重試載入逾時、分頁失去回應及暫時性網路錯誤。帳密遭拒、已辨識的銀行維護、
@@ -128,7 +130,7 @@ session 忙碌，原有專屬 API 錯誤碼仍供這些情境使用。session �
   原 session，不套用自動重開。
 - 失敗取樣最多一秒，隨後清理最多四秒；先呼叫 `browser.close()`，並透過 binding
   `DELETE /v1/devtools/browser/:sessionId` 確認遠端關閉。清理不能確認成功就停止，
-  不再開新 session。等待下一次 acquisition 額度只會發生在舊 session 已關閉後；
+  不再開新 session。重開時等待下一次 acquisition 額度只會發生在舊 session 已關閉後；
   診斷與最後清理可在準備預算外收尾。
 - `browser_login_preparation_failed` 記錄固定的準備階段（分頁初始化／設定、session
   還原、導覽、表單、驗證碼）、逾時來源（共用操作、整體預算、來源期限或來源內部操作）、
@@ -368,6 +370,13 @@ OTP 通過後，國泰可能先顯示「密碼已超過半年未更新」提醒�
 不建立帳單、不填入繳款期限；不得累加本機歷史交易替代本次小計。資產頁對未知信用卡餘額顯示
 「剩餘應繳金額未取得」，相關負債合計顯示「資料不完整」。繳款狀態以銀行已入帳資料為準，
 官方頁面說明付款後約需 1 至 3 個營業日入帳。
+
+#### 貸款帳戶與應繳資訊
+
+- 依序 POST `/ws/bank/loan/ws_loanaccount.ashx` 列出帳戶、對每筆帳戶 POST `ws_loaninfo.ashx` 讀取貸款欄位，再 POST `ws_paydetail.ashx` 讀取計息／繳息資訊。HTTP 2xx、有效 JSON 與 `Header=SUCCESS` 等回應驗證通過後，處理已收到的有效 `SubInfo` 列；若回應提供 `RecordCount`，必須等於末列索引（`SubInfo.length - 1`，空清單為 0），明確筆數不符或存在無效列要計為清單錯誤，但仍保留並處理其他有效列。此貸款清單端點可能不提供 `RecordCount`；缺失／為 null 是完整性未知，不是 API 或解析錯誤，成功的有效空清單也照一般無貸款結果處理。完整性未知的清單不可用來停用或刪除舊貸款；完整性未知本身不增加 failure count，也不把總匯標成 partial。最終摘要依實際清單、單筆貸款及應繳 API／解析錯誤區分成功、無貸款、部分及失敗。`ws_loaninfo` 請求使用 `AcctValue`、`AcctValueFormat`；`ws_paydetail` 的 `LNMAINACNO` 對應 `AcctValue`、`LNALTNO` 對應 `Sub1_Sub2`，其餘貸款參數取自該筆貸款資料。
+- `LoanKind` 依房屋貸款／信用貸款／其他映射為 `housing`／`personal`／`other`；`BeginLoanDate` 映射至 `opened_date`，`LoanBalance` 以負值保存，`Currency` 同時用於帳戶與餘額，`LoanRate` 為頁面以百分比顯示的數值百分點，保存時不再乘除 100。
+- `ws_paydetail.TopInfo` 摘要中的明確「應繳金額」標籤後總計值映射至共用 `loan_payment_amount`；標籤或金額無法唯一解析時留空，並由 persistence 保留既有非空值。`HeadInfo` 的 `DataValue3`（「計息起日／計息止日」）第二個日期映射至共用 `payment_due_date`；`HeadInfo` 的 `DataValue5` 是另一個「繳息金額」，`HeadInfo_2` 的 `DataValue6` 是「現有本金餘額」，兩者保留於 raw，不與總應繳額混用，也不建立繳款交易歷史。
+- 貸款清單、單筆貸款資料或應繳 API 失敗只略過無法確認的貸款欄位／帳戶，仍繼續其他貸款、存款與信用卡同步；單欄缺值不以 NULL 覆蓋舊的非空欄位。`Currency` 無法解析時仍保留其他可解析欄位、幣別留空且不建立本次餘額快照，既有幣別與快照不被覆寫。永豐貸款清單不完整時不停用或刪除既有貸款；本 connector 不依賴空清單清除資料。
 
 #### 授權與明細配對
 

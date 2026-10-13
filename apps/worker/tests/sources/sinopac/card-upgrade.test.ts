@@ -64,6 +64,14 @@ function parsed(details: Detail[], items: Item[] = []) {
     bankTransactions: result.bankTransactions,
     cardAuthorizations: result.cardAuthorizations,
     pendingSnapshotComplete: result.pendingSnapshotComplete,
+    loanSummary: {
+      overviewComplete: true,
+      accountListFailures: 0,
+      accountDetailFailures: 0,
+      paymentDetailFailures: 0,
+      accountCount: 0,
+      snapshotCount: 0,
+    },
   };
 }
 

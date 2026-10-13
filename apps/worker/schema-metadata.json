@@ -21,7 +21,7 @@
         "opened_date": "銀行提供的定存起息日；來源未提供時為 NULL。",
         "maturity_date": "銀行提供的定存到期日；不作為自動結清的判定條件。",
         "inactive_at": "同步確認來源不再列出定存的觀測時間，不是銀行實際結清日；有效帳戶為 NULL。",
-        "loan_category": "貸款類別，例如 housing（房屋貸款）或 other（其他貸款）。",
+        "loan_category": "貸款類別：housing（房屋貸款）、personal（信用貸款）或 other（其他貸款）。",
         "loan_interest_rate": "貸款年利率百分比；銀行未提供或無法解析時為 NULL。"
       }
     },

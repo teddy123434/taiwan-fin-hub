@@ -130,6 +130,16 @@ describe("calculateAssetSummary", () => {
             loanInstallmentsPaid: 10,
             loanInstallmentsTotal: 240,
           },
+          {
+            id: "personal-loan",
+            connectorId: "sinopac",
+            sourceId: "loan:sinopac:test",
+            institutionName: "永豐銀行",
+            accountType: "loan",
+            loanCategory: "personal",
+            balance: -10_000,
+            currency: "TWD",
+          },
         ],
         transactions: [],
       },
@@ -139,13 +149,25 @@ describe("calculateAssetSummary", () => {
     });
 
     expect(summary.bankTotal).toBe(80_000);
-    expect(summary.loanDebt).toBe(50_000);
-    expect(summary.netWorth).toBe(30_000);
-    expect(summary.institutionGroups[0]).toMatchObject({
+    expect(summary.loanDebt).toBe(60_000);
+    expect(summary.netWorth).toBe(20_000);
+    expect(summary.institutionGroups).toHaveLength(2);
+    const cathayGroup = summary.institutionGroups.find(
+      (group) => group.key === "bank:013",
+    );
+    const sinopacGroup = summary.institutionGroups.find(
+      (group) => group.key === "bank:807",
+    );
+    expect(cathayGroup).toMatchObject({
       accounts: [{ id: "cash" }],
       loans: [{ id: "loan" }],
       loanDebtTotalTwd: 50_000,
-      loanCategoryTotals: { housing: 50_000, other: 0 },
+      loanCategoryTotals: { housing: 50_000, personal: 0, other: 0 },
+    });
+    expect(sinopacGroup).toMatchObject({
+      loans: [{ id: "personal-loan" }],
+      loanDebtTotalTwd: 10_000,
+      loanCategoryTotals: { housing: 0, personal: 10_000, other: 0 },
     });
   });
 

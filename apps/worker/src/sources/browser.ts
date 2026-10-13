@@ -411,9 +411,8 @@ export async function prepareBrowserLoginWithRetry<T>(
               Math.ceil(limits.timeUntilNextAllowedBrowserAcquisition / 1_000),
             ),
           );
-          // Initial failures retain the caller's existing capacity policy.
-          // Replacement sessions wait only after confirmed remote closure.
-          if (attempt === 1) throw error;
+          // Wait before the first launch too; replacement sessions reach this
+          // loop only after the previous session was confirmed closed.
           await waitForCapacity(error);
           continue; // Recheck limits after every wait, before acquisition.
         }
@@ -457,7 +456,6 @@ export async function prepareBrowserLoginWithRetry<T>(
           controller.abort(error);
           signal.throwIfAborted();
           if (
-            attempt === 1 ||
             acquisitionAttempt >= BROWSER_ACQUISITION_ATTEMPTS ||
             !(error instanceof BrowserRunCapacityError) ||
             !rejectedBrowserAcquisitions.has(error) ||

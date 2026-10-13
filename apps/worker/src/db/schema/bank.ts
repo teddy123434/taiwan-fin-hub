@@ -52,6 +52,10 @@ export const bankAccounts = sqliteTable(
       foreignColumns: [table.id],
     }),
     check(
+      "bank_accounts_loan_category_check",
+      sql`loan_category IS NULL OR loan_category IN ('housing', 'personal', 'other')`,
+    ),
+    check(
       "bank_accounts_check_1",
       sql`
     account_type IS NULL

@@ -164,7 +164,10 @@ describe("同步資料完整性（隔離 D1）", () => {
 
   it("貸款六個 mapper 欄位經 insert/update 後可由 bank API 查詢", async () => {
     const sourceId = "loan:cathaybk:0000000000000001";
-    const accountRecord = (loanCategory: "housing" | "other", rate: number) =>
+    const accountRecord = (
+      loanCategory: "housing" | "personal" | "other",
+      rate: number,
+    ) =>
       bankAccountRecord(
         "cathaybk",
         {
@@ -224,6 +227,117 @@ describe("同步資料完整性（隔離 D1）", () => {
         loanPaymentStatus: "collection_incomplete",
         loanInstallmentsPaid: 18,
         loanInstallmentsTotal: 180,
+      }),
+    ]);
+  });
+
+  it("貸款資料缺值時保留既有非空類別、利率、開戶日與繳款欄位", async () => {
+    const sourceId = "loan:sinopac:stable-test-id";
+    const write = async (includeFields: boolean) => {
+      await persistStagedSyncWrite(db, {
+        records: [
+          bankAccountRecord(
+            "sinopac",
+            {
+              sourceId,
+              institutionName: "永豐銀行",
+              accountType: "loan",
+              currency: includeFields ? "TWD" : "",
+              ...(includeFields
+                ? {
+                    accountName: "信用貸款",
+                    loanCategory: "personal" as const,
+                    loanInterestRate: 2.07,
+                    openedDate: "2024-04-05",
+                  }
+                : {}),
+            },
+            now,
+          ),
+          ...(includeFields
+            ? [
+                bankBalanceSnapshotRecord(
+                  "sinopac",
+                  {
+                    accountId: sourceId,
+                    sourceId: "loan:current",
+                    balance: -493_828,
+                    currency: "TWD",
+                    asOfAt: now,
+                    paymentDueDate: "2026-10-12",
+                    loanPaymentAmount: 840,
+                  },
+                  now,
+                ),
+              ]
+            : []),
+        ],
+      });
+    };
+
+    await write(true);
+    await write(false);
+
+    const page = await getBankPage(db, 20);
+    expect(page.accounts).toEqual([
+      expect.objectContaining({
+        connectorId: "sinopac",
+        currency: "TWD",
+        accountName: "信用貸款",
+        loanCategory: "personal",
+        loanInterestRate: 2.07,
+        openedDate: "2024-04-05",
+        paymentDueDate: "2026-10-12",
+        loanPaymentAmount: 840,
+      }),
+    ]);
+  });
+
+  it("新貸款快照未解析總應繳金額時保留舊 loanPaymentAmount", async () => {
+    const sourceId = "loan:sinopac:payment-total-test";
+    const accountRecord = bankAccountRecord(
+      "sinopac",
+      {
+        sourceId,
+        institutionName: "永豐銀行",
+        accountType: "loan",
+        loanCategory: "personal",
+        currency: "TWD",
+      },
+      now,
+    );
+    const snapshotRecord = (
+      balance: number,
+      paymentDueDate: string,
+      loanPaymentAmount?: number,
+    ) =>
+      bankBalanceSnapshotRecord(
+        "sinopac",
+        {
+          accountId: sourceId,
+          sourceId: "loan:current",
+          balance,
+          currency: "TWD",
+          paymentDueDate,
+          asOfAt: now,
+          ...(loanPaymentAmount != null ? { loanPaymentAmount } : {}),
+        },
+        now,
+      );
+
+    await persistStagedSyncWrite(db, {
+      records: [accountRecord, snapshotRecord(-100_000, "2026-10-12", 840)],
+    });
+    await persistStagedSyncWrite(db, {
+      records: [accountRecord, snapshotRecord(-90_000, "2026-11-12")],
+    });
+
+    const page = await getBankPage(db, 20);
+    expect(page.accounts).toEqual([
+      expect.objectContaining({
+        balance: -90_000,
+        paymentDueDate: "2026-11-12",
+        loanPaymentAmount: 840,
       }),
     ]);
   });

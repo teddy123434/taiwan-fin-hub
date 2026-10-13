@@ -73,7 +73,7 @@
           ? `扣款未完成 · 期限 ${formatDate(loan.paymentDueDate)}`
           : "扣款未完成"
         : loan.paymentDueDate
-          ? `扣款日 ${formatDate(loan.paymentDueDate)}`
+          ? `期限 ${formatDate(loan.paymentDueDate)}`
           : null,
       loan.loanInstallmentsPaid != null && loan.loanInstallmentsTotal != null
         ? `已繳 ${loan.loanInstallmentsPaid} / 共 ${loan.loanInstallmentsTotal} 期`

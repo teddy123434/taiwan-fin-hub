@@ -11,7 +11,7 @@
 - Tables：31
 - Explicit indexes：44
 - Other objects：0
-- Migrations：52
+- Migrations：53
 
 ## Tables
 
@@ -75,8 +75,8 @@
 | 15 | `opened_date` | 銀行提供的定存起息日；來源未提供時為 NULL。 | TEXT | YES | — | — | — |
 | 16 | `maturity_date` | 銀行提供的定存到期日；不作為自動結清的判定條件。 | TEXT | YES | — | — | — |
 | 17 | `inactive_at` | 同步確認來源不再列出定存的觀測時間，不是銀行實際結清日；有效帳戶為 NULL。 | TEXT | YES | — | — | — |
-| 18 | `loan_category` | 貸款類別，例如 housing（房屋貸款）或 other（其他貸款）。 | TEXT | YES | — | — | — |
-| 19 | `loan_interest_rate` | 貸款年利率百分比；銀行未提供或無法解析時為 NULL。 | REAL | YES | — | — | — |
+| 18 | `loan_interest_rate` | 貸款年利率百分比；銀行未提供或無法解析時為 NULL。 | REAL | YES | — | — | — |
+| 19 | `loan_category` | 貸款類別：housing（房屋貸款）、personal（信用貸款）或 other（其他貸款）。 | TEXT | YES | — | — | — |
 
 #### Foreign keys
 
@@ -110,7 +110,11 @@ CREATE TABLE "bank_accounts" (
   bank_code TEXT,
   account_last4 TEXT,
   canonical_account_id TEXT REFERENCES "bank_accounts" (id),
-  credit_limit INTEGER, opened_date TEXT, maturity_date TEXT, inactive_at TEXT, loan_category TEXT CHECK (loan_category IS NULL OR loan_category IN ('housing', 'other')), loan_interest_rate REAL,
+  credit_limit INTEGER, opened_date TEXT, maturity_date TEXT, inactive_at TEXT, loan_interest_rate REAL, loan_category TEXT
+CHECK (
+  loan_category IS NULL
+  OR loan_category IN ('housing', 'personal', 'other')
+),
   UNIQUE (connector_id, source_id)
 )
 ```
@@ -1696,6 +1700,7 @@ Migration 是 schema 演進的 source of truth；若要了解某欄位的變更�
 - [`0052_bank_loan_overview.sql`](../apps/worker/migrations/0052_bank_loan_overview.sql)
 - [`0053_scheduled_sync_loan_debt.sql`](../apps/worker/migrations/0053_scheduled_sync_loan_debt.sql)
 - [`0054_weekly_sync_days.sql`](../apps/worker/migrations/0054_weekly_sync_days.sql)
+- [`0055_personal_loan_category.sql`](../apps/worker/migrations/0055_personal_loan_category.sql)
 
 ## 程式碼導覽
 

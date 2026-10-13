@@ -102,7 +102,7 @@ export interface BankAccount {
   institutionName?: string;
   accountName?: string;
   accountType?: BankAccountType;
-  loanCategory?: "housing" | "other";
+  loanCategory?: "housing" | "personal" | "other";
   loanInterestRate?: number;
   currency: string;
   openedDate?: string;

@@ -24,8 +24,12 @@ import {
   fetchSinopacDeposits,
   isSinopacDepositEmptyTransactions,
 } from "./deposit-protocol";
+import { fetchSinopacLoans, type SinopacLoanSyncResult } from "./loan-protocol";
 import { isNoCreditCardMessage } from "../credit-card-status";
 import { type SinopacConfig } from "./protocol";
+import { SinopacVerificationRequiredError } from "./verification-error";
+
+export { SinopacVerificationRequiredError } from "./verification-error";
 
 const MOBILE_HOST = "https://m.sinopac.com";
 const LOGIN_URL = `${MOBILE_HOST}/m/member/login/m_login.aspx`;
@@ -43,6 +47,18 @@ const CAPTCHA_VALIDITY_MS = 120_000;
 const ANDROID_USER_AGENT =
   "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UP1A.231105.003) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+
+function isLoginPageResponse(text: string) {
+  return /m_login|尚未登入|登入\/Login/i.test(text);
+}
+
+function isHtmlResponse(text: string, contentType: string | null) {
+  return (
+    contentType?.toLowerCase().includes("text/html") === true ||
+    /^\s*<!doctype\s+html\b/i.test(text) ||
+    /^\s*<html\b/i.test(text)
+  );
+}
 
 type JsonRecord = Record<string, unknown>;
 type FetchImpl = typeof fetch;
@@ -63,13 +79,6 @@ type Scraped = {
   bankTransactions: Array<Omit<BankTransaction, "id" | "connectorId">>;
   creditCardBills: Array<Omit<CreditCardBill, "id" | "connectorId">>;
 };
-
-export class SinopacVerificationRequiredError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "SinopacVerificationRequiredError";
-  }
-}
 
 export class SinopacCaptchaRejectedError extends SinopacVerificationRequiredError {
   constructor(message: string) {
@@ -108,14 +117,25 @@ export function createSinopacConnector(
       _cursor?: string,
     ): Promise<
       SyncResult<never> &
-        Pick<Scraped, "pendingSnapshotComplete" | "cardAuthorizations">
+        Pick<Scraped, "pendingSnapshotComplete" | "cardAuthorizations"> & {
+          loanSummary: {
+            overviewComplete: boolean;
+            accountListFailures: number;
+            accountDetailFailures: number;
+            paymentDetailFailures: number;
+            accountCount: number;
+            snapshotCount: number;
+          };
+        }
     > {
       let sessionCookies = config.sessionCookies;
       let browserInstance: Browser | undefined;
       let verifiedThisRun = false;
 
       if (config.browserSessionId && config.captcha) {
-        if (!browser) throw new Error("永豐首次驗證需要 BROWSER binding。");
+        if (!browser) {
+          throw new Error("永豐首次驗證需要 BROWSER binding。");
+        }
         if (
           !config.browserSessionExpiresAt ||
           new Date(config.browserSessionExpiresAt) <= new Date()
@@ -175,17 +195,48 @@ export function createSinopacConnector(
         fetchImpl,
       );
       const now = new Date();
+
       const deposits = await client.fetchDeposits(now);
+
       const payloads = await client.fetchCreditCards();
       const cards = parseSinopacCardData(payloads);
 
+      let loans: SinopacLoanSyncResult;
+
+      try {
+        loans = await client.fetchLoans(now);
+      } catch (error) {
+        if (error instanceof SinopacVerificationRequiredError) throw error;
+        loans = {
+          bankAccounts: [],
+          bankBalanceSnapshots: [],
+          loanOverviewComplete: false,
+          accountListFailures: 1,
+          accountDetailFailures: 0,
+          paymentDetailFailures: 0,
+          skippedAccounts: 0,
+        };
+      }
       return {
         records: [],
         ...cards,
-        bankAccounts: [...deposits.bankAccounts, ...cards.bankAccounts],
+        loanSummary: {
+          overviewComplete: loans.loanOverviewComplete,
+          accountListFailures: loans.accountListFailures,
+          accountDetailFailures: loans.accountDetailFailures,
+          paymentDetailFailures: loans.paymentDetailFailures,
+          accountCount: loans.bankAccounts.length,
+          snapshotCount: loans.bankBalanceSnapshots.length,
+        },
+        bankAccounts: [
+          ...deposits.bankAccounts,
+          ...cards.bankAccounts,
+          ...loans.bankAccounts,
+        ],
         bankBalanceSnapshots: [
           ...deposits.bankBalanceSnapshots,
           ...cards.bankBalanceSnapshots,
+          ...loans.bankBalanceSnapshots,
         ],
         bankTransactions: [
           ...deposits.bankTransactions,
@@ -220,6 +271,13 @@ class SinopacAppClient {
 
   fetchDeposits(now: Date) {
     return fetchSinopacDeposits(
+      (path, label, body) => this.post(path, label, body.toString()),
+      now,
+    );
+  }
+
+  fetchLoans(now: Date) {
+    return fetchSinopacLoans(
       (path, label, body) => this.post(path, label, body.toString()),
       now,
     );
@@ -303,19 +361,29 @@ class SinopacAppClient {
       },
     );
     const text = await response.text();
+
+    const loginPage = isLoginPageResponse(text);
+    const htmlResponse = isHtmlResponse(
+      text,
+      response.headers.get("content-type"),
+    );
+
     if (!response.ok) {
       throw new Error(`永豐${label} API 回應 HTTP ${response.status}。`);
+    }
+    if (loginPage) {
+      throw new SinopacVerificationRequiredError(
+        "永豐銀行 session 已失效，請重新完成圖形驗證。",
+      );
+    }
+    if (htmlResponse) {
+      throw new Error(`永豐${label} API 回應不是有效 JSON。`);
     }
 
     let payload: unknown;
     try {
       payload = JSON.parse(text);
     } catch {
-      if (/m_login|尚未登入|登入\/Login/i.test(text)) {
-        throw new SinopacVerificationRequiredError(
-          "永豐銀行 session 已失效，請重新完成圖形驗證。",
-        );
-      }
       throw new Error(`永豐${label} API 回應不是有效 JSON。`);
     }
     const creditCardStage = path.startsWith("/ws/card/");
@@ -366,19 +434,29 @@ class SinopacAppClient {
     );
     storeSetCookies(this.sinoCardCookies, response.headers);
     const text = await response.text();
+
+    const loginPage = isLoginPageResponse(text);
+    const htmlResponse = isHtmlResponse(
+      text,
+      response.headers.get("content-type"),
+    );
+
     if (!response.ok) {
       throw new Error(`永豐${label} API 回應 HTTP ${response.status}。`);
+    }
+    if (loginPage) {
+      throw new SinopacVerificationRequiredError(
+        "永豐銀行 session 已失效，請重新完成圖形驗證。",
+      );
+    }
+    if (htmlResponse) {
+      throw new Error(`永豐${label} API 回應不是有效 JSON。`);
     }
 
     let payload: unknown;
     try {
       payload = JSON.parse(text);
     } catch {
-      if (/m_login|尚未登入|登入\/Login/i.test(text)) {
-        throw new SinopacVerificationRequiredError(
-          "永豐銀行 session 已失效，請重新完成圖形驗證。",
-        );
-      }
       throw new Error(`永豐${label} API 回應不是有效 JSON。`);
     }
     if (
@@ -446,7 +524,9 @@ export async function loginSinopacWithOcr(
       "請先儲存永豐身分證字號／統編、使用者代碼與網路密碼。",
     );
   }
-  if (!browser) throw new Error("永豐自動驗證需要 BROWSER binding。");
+  if (!browser) {
+    throw new Error("永豐自動驗證需要 BROWSER binding。");
+  }
 
   const { browser: browserInstance, value: prepared } =
     await prepareBrowserLoginWithRetry({
@@ -486,14 +566,17 @@ export async function loginSinopacWithOcr(
           throw new Error("Gemma 4 未回傳六位數字。");
         }
         await submitLogin(page, captcha);
+        const sessionCookies = JSON.stringify(await page.cookies());
+
         return {
-          sessionCookies: JSON.stringify(await page.cookies()),
+          sessionCookies,
           protocol: SINOPAC_SESSION_PROTOCOL,
         };
       } catch (error) {
         if (error instanceof SinopacCredentialRejectedError) throw error;
       }
     }
+
     throw new SinopacVerificationRequiredError(
       `永豐自動驗證連續失敗 ${SINOPAC_AUTO_LOGIN_ATTEMPTS} 次，請改用人工驗證。`,
     );

@@ -8,7 +8,7 @@ export interface BankAccountResponse {
   institutionName?: string | null;
   accountName?: string | null;
   accountType?: string | null;
-  loanCategory?: "housing" | "other" | null;
+  loanCategory?: "housing" | "personal" | "other" | null;
   loanInterestRate?: number | null;
   currency: string;
   bankCode?: string | null;

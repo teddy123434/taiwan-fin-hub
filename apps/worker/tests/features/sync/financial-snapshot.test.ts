@@ -73,6 +73,13 @@ describe("scheduled financial snapshot loan debt", () => {
       loanDebtTwd: 0,
       missingCurrencies: [],
     });
+    await expect(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS snapshotCount FROM bank_balance_snapshots WHERE account_id = 'loan'",
+        )
+        .first<{ snapshotCount: number }>(),
+    ).resolves.toEqual({ snapshotCount: 1 });
   });
 
   it("treats legacy batches with NULL loan snapshots as a completed baseline", async () => {
