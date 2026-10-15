@@ -14,7 +14,7 @@
     ShieldCheck,
     Smartphone,
   } from "@lucide/svelte";
-  import BrowserBankConnectionHelp from "./BrowserBankConnectionHelp.svelte";
+  import CaptchaBankConnectionHelp from "./CaptchaBankConnectionHelp.svelte";
   import ConnectionProgress from "./ConnectionProgress.svelte";
   import CtbcVerification from "./CtbcVerification.svelte";
   import Card from "@/shared/ui/Card.svelte";
@@ -22,8 +22,16 @@
   import Input from "@/shared/ui/Input.svelte";
   import Select from "@/shared/ui/Select.svelte";
   import TimePicker from "@/shared/ui/TimePicker.svelte";
+  import {
+    connectorCatalog,
+    type ConnectorCapability,
+  } from "@taiwan-fin-hub/shared";
   import WeekdayPicker from "../components/WeekdayPicker.svelte";
-  import { formatScheduleWeekdays } from "../model/schedule";
+  import {
+    formatScheduleWeekdays,
+    syncIntervalLabel,
+    syncIntervalOptions,
+  } from "../model/schedule";
   import type { ApiClient } from "@/shared/api/client";
   import { ApiRequestError } from "@/shared/api/client";
   import { isRequestInterrupted } from "@/shared/api/interrupted";
@@ -34,7 +42,6 @@
     syncScheduleQuery,
   } from "@/data/connectors/queries";
   import type {
-    ConnectorField,
     ConnectorId,
     QueuedSyncResponse,
     SyncJobRow,
@@ -42,28 +49,27 @@
   } from "@/data/connectors/types";
   import { formatDateTime } from "@/shared/format/financial";
   import {
-    browserCaptchaFailure,
+    captchaBankFailure,
     isManualCaptchaRequired,
-    isMegabankOtpRequired,
+    isBankOtpRequired,
     megabankOtpFailure,
     needsNextbankCaptcha,
-  } from "./browser-captcha";
+  } from "./captcha-bank";
 
   let {
     api,
     connectorId,
     demoMode,
     title,
-    fields,
     embedded = false,
   }: {
     api: ApiClient;
     connectorId: ConnectorId;
     demoMode: boolean;
     title: string;
-    fields: ConnectorField[];
     embedded?: boolean;
   } = $props();
+  const fields = $derived(connectorCatalog[connectorId].credentialFields);
   const qc = useQueryClient();
   const settings = createQuery(
     toStore(() => connectorSettingsQuery(() => api, connectorId)),
@@ -97,7 +103,11 @@
   let megabankOtp = $state("");
   let megabankOtpExpiresAt = $state<number | null>(null);
   let megabankOtpSecondsRemaining = $state(0);
-  const MEGABANK_OTP_WINDOW_MS = 3 * 60_000;
+  // 兆豐異地簡訊 3 分鐘；台北富邦雙重驗證 OTP 官方 300 秒，伺服器保留約 4.5 分鐘。
+  const otpWindowMs = $derived(
+    connectorId === "fubon" ? 4.5 * 60_000 : 3 * 60_000,
+  );
+  const otpBankName = $derived(connectorId === "fubon" ? "台北富邦" : "兆豐");
   let pendingSyncTarget = $state<SyncTarget>("default");
   let einvoiceSyncQueued = $state(false);
   let einvoiceSyncQueuedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -192,17 +202,17 @@
       return null;
     const code = job.lastErrorCode;
     if (
-      browserBank &&
+      captchaBank &&
       connectorId !== "nextbank" &&
       code === "MANUAL_CAPTCHA_REQUIRED" &&
       !bankCaptchaImage &&
-      !$prepareBrowserBank.isPending
+      !$prepareCaptchaBank.isPending
     )
       return code;
     if (
-      code === "MEGABANK_SMS_OTP_REQUIRED" &&
+      (code === "MEGABANK_SMS_OTP_REQUIRED" || code === "FUBON_OTP_REQUIRED") &&
       !megabankOtpStep &&
-      Date.parse(job.lastRunAt ?? "") + MEGABANK_OTP_WINDOW_MS > Date.now()
+      Date.parse(job.lastRunAt ?? "") + otpWindowMs > Date.now()
     )
       return code;
     if (
@@ -222,22 +232,26 @@
     if (connectorId === "tdcc" && tdccSyncPolling === null)
       startTdccSyncPolling();
   });
-  const browserBank = $derived(
-    connectorId === "sinopac" ||
-      connectorId === "taishin" ||
-      connectorId === "obank" ||
-      connectorId === "nextbank" ||
-      connectorId === "firstbank" ||
-      connectorId === "hncb" ||
-      connectorId === "rakuten" ||
-      connectorId === "kgibank" ||
-      connectorId === "megabank",
+  // 需要使用者輸入驗證碼的來源，包含走 App API 的王道、將來與兆豐；依 catalog 的連接模式判斷。
+  const captchaBank = $derived(
+    connectorCatalog[connectorId].connectionMode ===
+      "browser_captcha_session" ||
+      connectorCatalog[connectorId].connectionMode === "api_captcha_session",
   );
-  const browserBankSessionAvailable = $derived(
-    browserBank && Boolean($settings.data?.sessionAvailable),
+  const captchaBankSessionAvailable = $derived(
+    captchaBank && Boolean($settings.data?.sessionAvailable),
+  );
+  const syncsCreditCardBills = $derived(
+    (
+      connectorCatalog[connectorId]
+        .capabilities as readonly ConnectorCapability[]
+    ).includes("credit_card_bill"),
   );
   const megabankOtpActive = $derived(
-    connectorId === "megabank" && megabankOtpStep,
+    (connectorId === "megabank" || connectorId === "fubon") && megabankOtpStep,
+  );
+  const otpPattern = $derived(
+    connectorId === "fubon" ? /^\d{6}$/ : /^\d{4,8}$/,
   );
   const tdccConnectionReady = $derived(
     connectorId === "tdcc" && Boolean($settings.data?.sessionAvailable),
@@ -264,13 +278,6 @@
             ? "email"
             : "credentials",
   );
-  const intervalOptions = [
-    { label: "每小時", minutes: 60 },
-    { label: "每 6 小時", minutes: 360 },
-    { label: "每 12 小時", minutes: 720 },
-    { label: "每天", minutes: 1440 },
-    { label: "每週", minutes: 10080 },
-  ];
 
   onMount(() =>
     settings.subscribe((result) => {
@@ -343,10 +350,7 @@
     onSuccess: () => {
       error = "";
       if (connectorId === "cathaybk") resetCathayVerification();
-      for (const field of fields) {
-        if (field.type === "text" || field.type === "password")
-          values[field.key] = "";
-      }
+      for (const field of fields) values[field.key] = "";
       qc.invalidateQueries({
         queryKey: queryKeys.connectorSettings(connectorId),
       });
@@ -362,7 +366,7 @@
   const sync = createMutation({
     mutationFn: (target: SyncTarget) => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
-      if (browserBank) {
+      if (captchaBank) {
         if (connectorId === "nextbank") bankOperation = "sync";
         bankCaptchaImage = "";
         bankCaptcha = "";
@@ -447,11 +451,11 @@
         return;
       }
     }
-    if (connectorId === "megabank" && isMegabankOtpRequired(e)) {
+    if (isBankOtpRequired(connectorId, e)) {
       enterMegabankOtp(
         e instanceof Error && e.message
           ? e.message
-          : "兆豐銀行已寄出簡訊驗證碼，請於三分鐘內輸入。",
+          : `${otpBankName}銀行已寄出驗證碼，請於時限內輸入。`,
         megabankOtpExpiresAt,
       );
       qc.invalidateQueries({
@@ -460,13 +464,13 @@
       return;
     }
     error = e instanceof Error ? e.message : "同步失敗";
-    if (browserBank && isManualCaptchaRequired(e)) {
+    if (captchaBank && isManualCaptchaRequired(e)) {
       // 自動辨識失敗：直接取得人工驗證碼，不再重試自動登入
-      $prepareBrowserBank.mutate();
+      $prepareCaptchaBank.mutate();
     } else if (needsNextbankCaptcha(connectorId, e)) {
-      $prepareBrowserBank.mutate();
+      $prepareCaptchaBank.mutate();
     }
-    if (browserBank)
+    if (captchaBank)
       qc.invalidateQueries({
         queryKey: queryKeys.connectorSettings(connectorId),
       });
@@ -487,11 +491,13 @@
     if (!job?.lastErrorCode) return;
     error = "";
     const failure = syncJobFailure(job);
-    if (job.lastErrorCode === "MEGABANK_SMS_OTP_REQUIRED") {
-      const expiresAt =
-        Date.parse(job.lastRunAt ?? "") + MEGABANK_OTP_WINDOW_MS;
+    if (
+      job.lastErrorCode === "MEGABANK_SMS_OTP_REQUIRED" ||
+      job.lastErrorCode === "FUBON_OTP_REQUIRED"
+    ) {
+      const expiresAt = Date.parse(job.lastRunAt ?? "") + otpWindowMs;
       if (!(expiresAt > Date.now())) {
-        error = "兆豐簡訊驗證碼已逾時，請重新同步取得新的驗證碼。";
+        error = `${otpBankName}驗證碼已逾時，請重新同步取得新的驗證碼。`;
         return;
       }
       handleSyncFailure(failure, expiresAt);
@@ -524,10 +530,10 @@
       error = e instanceof Error ? e.message : "集保連線失敗";
     },
   });
-  const prepareBrowserBank = createMutation({
+  const prepareCaptchaBank = createMutation({
     mutationFn: () => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
-      if (!browserBank) throw new Error("此資料來源不支援圖形驗證。");
+      if (!captchaBank) throw new Error("此資料來源不支援圖形驗證。");
       if (connectorId === "nextbank") bankOperation = "captcha";
       bankCaptchaImage = "";
       bankCaptcha = "";
@@ -558,7 +564,7 @@
     },
     onError: (e) => (error = e instanceof Error ? e.message : "取得驗證碼失敗"),
   });
-  const verifyBrowserBank = createMutation({
+  const verifyCaptchaBank = createMutation({
     mutationFn: () => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
       if (connectorId === "nextbank") bankOperation = "sync";
@@ -594,22 +600,22 @@
     },
     onError: (e) => {
       if (needsNextbankCaptcha(connectorId, e)) {
-        $prepareBrowserBank.mutate();
+        $prepareCaptchaBank.mutate();
         qc.invalidateQueries({ queryKey: queryKeys.syncJobs });
         return;
       }
-      if (connectorId === "megabank" && isMegabankOtpRequired(e)) {
+      if (isBankOtpRequired(connectorId, e)) {
         enterMegabankOtp(
           e instanceof Error
             ? e.message
-            : "兆豐銀行已寄出簡訊驗證碼，請於三分鐘內輸入。",
+            : `${otpBankName}銀行已寄出驗證碼，請於時限內輸入。`,
         );
         qc.invalidateQueries({
           queryKey: queryKeys.connectorSettings(connectorId),
         });
         return;
       }
-      const failure = browserCaptchaFailure(e);
+      const failure = captchaBankFailure(e);
       error = failure.message;
       if (failure.sessionInvalidated || bankVerificationSubmitted) {
         bankCaptcha = "";
@@ -624,9 +630,13 @@
     mutationFn: () => {
       if (demoMode) throw new Error("Demo site 已停用連接器同步。");
       const trimmed = megabankOtp.trim();
-      if (!/^\d{4,8}$/.test(trimmed))
-        throw new Error("請輸入簡訊收到的 4-8 位數字驗證碼。");
-      return api.post(`/api/connectors/megabank/sync`, { otp: trimmed });
+      if (!otpPattern.test(trimmed))
+        throw new Error(
+          connectorId === "fubon"
+            ? "請輸入簡訊或 Email 收到的 6 位數字驗證碼。"
+            : "請輸入簡訊收到的 4-8 位數字驗證碼。",
+        );
+      return api.post(`/api/connectors/${connectorId}/sync`, { otp: trimmed });
     },
     onSuccess: () => {
       error = "";
@@ -648,10 +658,10 @@
         error =
           e instanceof Error
             ? e.message
-            : "兆豐銀行簡訊驗證碼不正確，請重新輸入。";
+            : `${otpBankName}銀行驗證碼不正確，請重新輸入。`;
         return;
       }
-      const failure = browserCaptchaFailure(e);
+      const failure = captchaBankFailure(e);
       resetMegabankOtp();
       error = failure.message;
       qc.invalidateQueries({
@@ -826,7 +836,7 @@
 
   function enterMegabankOtp(
     message: string,
-    expiresAt = Date.now() + MEGABANK_OTP_WINDOW_MS,
+    expiresAt = Date.now() + otpWindowMs,
   ) {
     error = "";
     bankCaptcha = "";
@@ -857,7 +867,7 @@
       Math.ceil((megabankOtpExpiresAt - Date.now()) / 1_000),
     );
     if (megabankOtpSecondsRemaining <= 0) {
-      error = "兆豐簡訊驗證碼已逾時，請重新取得驗證碼。";
+      error = `${otpBankName}驗證碼已逾時，請重新同步。`;
       resetMegabankOtp();
     }
   }
@@ -868,10 +878,7 @@
     otp = "";
     if (loginVerified) tdccSetupStep = "complete";
     $sync.reset();
-    for (const field of fields) {
-      if (field.type === "text" || field.type === "password")
-        values[field.key] = "";
-    }
+    for (const field of fields) values[field.key] = "";
     qc.invalidateQueries({
       queryKey: queryKeys.connectorSettings(connectorId),
     });
@@ -886,16 +893,11 @@
   }
 
   function buildConfig() {
-    const entries: Array<[string, string | number]> = [];
+    const entries: Array<[string, string]> = [];
     for (const field of fields) {
       const raw = values[field.key];
       if (raw === undefined || raw === "") continue;
-      if (field.type !== "number") {
-        entries.push([field.key, raw]);
-        continue;
-      }
-      const number = Number(raw);
-      if (Number.isFinite(number)) entries.push([field.key, number]);
+      entries.push([field.key, raw]);
     }
     return Object.fromEntries(entries);
   }
@@ -925,14 +927,11 @@
       connectorId === "ctbc"
     ) {
       qc.invalidateQueries({ queryKey: queryKeys.bank });
-      if (connectorId !== "esun")
-        qc.invalidateQueries({ queryKey: queryKeys.bills });
-    } else if (browserBank) {
+    } else if (captchaBank) {
       qc.invalidateQueries({
         queryKey: queryKeys.connectorSettings(connectorId),
       });
       qc.invalidateQueries({ queryKey: queryKeys.bank });
-      qc.invalidateQueries({ queryKey: queryKeys.bills });
     } else {
       if (
         pendingSyncTarget === "default" ||
@@ -944,6 +943,9 @@
       if (pendingSyncTarget === "default" || pendingSyncTarget === "bank")
         qc.invalidateQueries({ queryKey: queryKeys.bank });
     }
+    // 依 connector catalog 判斷，有信用卡帳單的來源同步後一律重抓帳單。
+    if (syncsCreditCardBills)
+      qc.invalidateQueries({ queryKey: queryKeys.bills });
   }
   function startInterruptedSyncPolling() {
     error = "";
@@ -1081,12 +1083,6 @@
   function invalidateLatestSyncReport() {
     qc.invalidateQueries({ queryKey: queryKeys.latestSyncReport });
   }
-  function intervalLabel(minutes: number) {
-    return (
-      intervalOptions.find((option) => option.minutes === minutes)?.label ??
-      `${minutes} 分鐘`
-    );
-  }
 </script>
 
 <Card
@@ -1141,14 +1137,14 @@
         <span class="text-sm text-muted-foreground"
           >在下方查看進度與同步帳戶</span
         >
-      {:else if browserBank}
-        {#if browserBankSessionAvailable}
+      {:else if captchaBank}
+        {#if captchaBankSessionAvailable}
           <Button
             size="sm"
             disabled={demoMode ||
               syncBusy ||
               $sync.isPending ||
-              $verifyBrowserBank.isPending ||
+              $verifyCaptchaBank.isPending ||
               megabankOtpActive}
             onclick={() => {
               error = "";
@@ -1163,14 +1159,14 @@
             variant="outline"
             disabled={demoMode ||
               syncBusy ||
-              $prepareBrowserBank.isPending ||
-              $verifyBrowserBank.isPending ||
+              $prepareCaptchaBank.isPending ||
+              $verifyCaptchaBank.isPending ||
               megabankOtpActive}
             onclick={() => {
               error = "";
-              $prepareBrowserBank.mutate();
+              $prepareCaptchaBank.mutate();
             }}
-            ><KeyRound class="size-4" />{$prepareBrowserBank.isPending
+            ><KeyRound class="size-4" />{$prepareCaptchaBank.isPending
               ? "取得中…"
               : "人工重新驗證"}</Button
           >
@@ -1180,8 +1176,8 @@
             disabled={demoMode ||
               syncBusy ||
               $sync.isPending ||
-              $prepareBrowserBank.isPending ||
-              $verifyBrowserBank.isPending ||
+              $prepareCaptchaBank.isPending ||
+              $verifyCaptchaBank.isPending ||
               megabankOtpActive}
             onclick={() => {
               error = "";
@@ -1199,14 +1195,14 @@
             disabled={demoMode ||
               syncBusy ||
               $sync.isPending ||
-              $prepareBrowserBank.isPending ||
-              $verifyBrowserBank.isPending ||
+              $prepareCaptchaBank.isPending ||
+              $verifyCaptchaBank.isPending ||
               megabankOtpActive}
             onclick={() => {
               error = "";
-              $prepareBrowserBank.mutate();
+              $prepareCaptchaBank.mutate();
             }}
-            ><KeyRound class="size-4" />{$prepareBrowserBank.isPending
+            ><KeyRound class="size-4" />{$prepareCaptchaBank.isPending
               ? "取得中…"
               : "人工輸入驗證碼"}</Button
           >
@@ -1279,7 +1275,7 @@
       connectionReady={cathayConnectionReady}
       source="cathaybk"
     />
-  {:else if browserBank}
+  {:else if captchaBank}
     {#if connectorId === "nextbank"}
       <section
         aria-label="同步進度"
@@ -1291,12 +1287,12 @@
           <p class="mt-1 text-sm text-muted-foreground">
             請填寫下方連線憑證並儲存，再按「同步帳戶」。
           </p>
-        {:else if $prepareBrowserBank.isPending}
+        {:else if $prepareCaptchaBank.isPending}
           <p role="status" class="font-semibold">正在取得驗證碼圖片…</p>
           <p class="mt-1 text-sm">
             取得後會在下方顯示圖片與輸入欄，請勿重複點擊。
           </p>
-        {:else if $sync.isPending || $verifyBrowserBank.isPending || syncBusy}
+        {:else if $sync.isPending || $verifyCaptchaBank.isPending || syncBusy}
           <p role="status" class="font-semibold">正在登入並查詢帳戶…</p>
           <p class="mt-1 text-sm">尚未完成同步，請勿重複提交。</p>
         {:else if error}
@@ -1342,19 +1338,19 @@
                 syncBusy ||
                 $save.isPending ||
                 $sync.isPending ||
-                $prepareBrowserBank.isPending ||
-                $verifyBrowserBank.isPending}
+                $prepareCaptchaBank.isPending ||
+                $verifyCaptchaBank.isPending}
               onclick={() => {
                 error = "";
                 $sync.mutate("default");
               }}
             >
               <RefreshCw
-                class={$sync.isPending || $verifyBrowserBank.isPending
+                class={$sync.isPending || $verifyCaptchaBank.isPending
                   ? "size-4 animate-spin"
                   : "size-4"}
               />
-              {$sync.isPending || $verifyBrowserBank.isPending
+              {$sync.isPending || $verifyCaptchaBank.isPending
                 ? "同步中…"
                 : (syncBusyLabel ?? "同步帳戶")}
             </Button>
@@ -1366,11 +1362,11 @@
                 syncBusy ||
                 $save.isPending ||
                 $sync.isPending ||
-                $prepareBrowserBank.isPending ||
-                $verifyBrowserBank.isPending}
-              onclick={() => $prepareBrowserBank.mutate()}
+                $prepareCaptchaBank.isPending ||
+                $verifyCaptchaBank.isPending}
+              onclick={() => $prepareCaptchaBank.mutate()}
             >
-              <KeyRound class="size-4" />{$prepareBrowserBank.isPending
+              <KeyRound class="size-4" />{$prepareCaptchaBank.isPending
                 ? "取得驗證碼中…"
                 : bankOperation === "captcha"
                   ? "重新取得驗證碼"
@@ -1408,7 +1404,7 @@
           </p>{/if}
       </section>
     {/if}
-    <BrowserBankConnectionHelp
+    <CaptchaBankConnectionHelp
       bankName={connectorId === "nextbank"
         ? "將來"
         : connectorId === "taishin"
@@ -1425,20 +1421,22 @@
                     ? "兆豐"
                     : connectorId === "rakuten"
                       ? "樂天"
-                      : "永豐"}
+                      : connectorId === "fubon"
+                        ? "台北富邦"
+                        : "永豐"}
       bind:captcha={bankCaptcha}
       captchaImage={bankCaptchaImage}
       digitCount={bankCaptchaDigitCount}
       captchaKind={bankCaptchaKind}
-      preparing={$prepareBrowserBank.isPending}
-      verifying={$verifyBrowserBank.isPending}
+      preparing={$prepareCaptchaBank.isPending}
+      verifying={$verifyCaptchaBank.isPending}
       syncing={$sync.isPending}
       expiresIn={connectorId === "nextbank" ? bankCaptchaSeconds : undefined}
       onVerify={() => {
         error = "";
-        $verifyBrowserBank.mutate();
+        $verifyCaptchaBank.mutate();
       }}
-      onRefresh={() => $prepareBrowserBank.mutate()}
+      onRefresh={() => $prepareCaptchaBank.mutate()}
     />
   {/if}
   {#if pendingUserAction}
@@ -1453,8 +1451,8 @@
       <Button
         size="sm"
         disabled={demoMode ||
-          $prepareBrowserBank.isPending ||
-          $verifyBrowserBank.isPending}
+          $prepareCaptchaBank.isPending ||
+          $verifyCaptchaBank.isPending}
         onclick={resumePendingUserAction}>處理</Button
       >
     </div>
@@ -1467,8 +1465,8 @@
         {#if syncStatusLabel && connectorId !== "nextbank"}
           <p class="flex flex-wrap items-center gap-x-2 text-ink/70">
             <span class="font-semibold text-ink">狀態：{syncStatusLabel}</span>
-            {#if browserBank}<span aria-hidden="true">·</span><span
-                >{browserBankSessionAvailable
+            {#if captchaBank}<span aria-hidden="true">·</span><span
+                >{captchaBankSessionAvailable
                   ? "已保存登入"
                   : "下次同步自動登入"}</span
               >{/if}
@@ -1557,7 +1555,7 @@
                 )}
                 {$defaultSchedule.data.preferredTime} 起
               {:else}
-                {intervalLabel(
+                {syncIntervalLabel(
                   $defaultSchedule.data.intervalMinutes,
                 )}{#if $defaultSchedule.data.intervalMinutes >= 1440}
                   {$defaultSchedule.data.preferredTime} 起{/if}
@@ -1579,7 +1577,7 @@
                   ),
                 })}
             >
-              {#each intervalOptions as option (option.minutes)}
+              {#each syncIntervalOptions as option (option.minutes)}
                 <option value={option.minutes}>{option.label}</option>
               {/each}
             </Select>
@@ -1654,8 +1652,7 @@
         {#each fields as field (field.key)}
           {@const storedCredential = Boolean(
             $settings.data?.configured &&
-            (connectorId !== "tdcc" || tdccCredentialsComplete) &&
-            (field.type === "text" || field.type === "password"),
+            (connectorId !== "tdcc" || tdccCredentialsComplete),
           )}
           {@const hasReplacement = Boolean(String(values[field.key] ?? ""))}
           <label class="grid gap-1.5 text-sm font-medium">
@@ -1684,7 +1681,7 @@
               data-form-type="other"
               placeholder={storedCredential && !hasReplacement
                 ? "••••••••　已安全儲存"
-                : field.placeholder}
+                : undefined}
               value={String(values[field.key] ?? "")}
               onfocus={() => (focusedCredentialKeys[field.key] = true)}
               oninput={(e: Event) =>
@@ -1963,7 +1960,9 @@
           <Smartphone class="size-4.5" />
         </span>
         <div>
-          <p class="text-sm font-semibold text-fg">簡訊驗證碼已寄出</p>
+          <p class="text-sm font-semibold text-fg">
+            {connectorId === "fubon" ? "雙重驗證碼已寄出" : "簡訊驗證碼已寄出"}
+          </p>
           <p class="mt-0.5 text-sm leading-relaxed text-fg/60">
             {megabankOtpMessage}
           </p>
@@ -1974,14 +1973,16 @@
       </div>
       <div class="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto]">
         <label class="grid gap-1.5 text-sm font-medium">
-          簡訊驗證碼
+          {connectorId === "fubon" ? "簡訊／Email 驗證碼" : "簡訊驗證碼"}
           <Input
             class="bg-card/80 tracking-[0.2em]"
             inputmode="numeric"
             autocomplete="one-time-code"
-            pattern={"[0-9]{4,8}"}
-            maxlength={8}
-            placeholder="4-8 位數字驗證碼"
+            pattern={connectorId === "fubon" ? "[0-9]{6}" : "[0-9]{4,8}"}
+            maxlength={connectorId === "fubon" ? 6 : 8}
+            placeholder={connectorId === "fubon"
+              ? "6 位數字驗證碼"
+              : "4-8 位數字驗證碼"}
             bind:value={megabankOtp}
           />
         </label>
@@ -1989,7 +1990,7 @@
           class="self-end"
           size="sm"
           disabled={$verifyMegabankOtp.isPending ||
-            !/^\d{4,8}$/.test(megabankOtp.trim())}
+            !otpPattern.test(megabankOtp.trim())}
           onclick={() => {
             error = "";
             $verifyMegabankOtp.mutate();
@@ -2039,6 +2040,8 @@
                       ? "中信 App 核准只適用於當次登入，目前尚未支援網銀的信任瀏覽器功能。需要兩階段驗證時請在此完成；銀行仍可能要求再次核准或換密碼。"
                       : connectorId === "rakuten"
                         ? "樂天網銀驗證碼會先以 Workers AI 自動辨識，失敗時改由人工輸入；每次同步都重新登入，結束時登出，不保留 session。"
-                        : "輸入完帳號密碼後，請先按「儲存設定」，再按「同步」。"}
+                        : connectorId === "fubon"
+                          ? "台北富邦每次同步都會自動辨識 6 位數圖形驗證碼，失敗時可改用人工輸入；同步結束後自動登出。非信任裝置需雙重驗證時，只有手動同步會寄送簡訊／Email 驗證碼，排程同步會標記需要處理。"
+                          : "輸入完帳號密碼後，請先按「儲存設定」，再按「同步」。"}
   </p>
 </Card>
