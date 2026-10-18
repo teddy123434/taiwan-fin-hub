@@ -12,6 +12,7 @@ const FIRSTBANK_BANK_CODE = "007";
 const MEGABANK_BANK_CODE = "017";
 const TAISHIN_BANK_CODE = "812";
 const FUBON_BANK_CODE = "012";
+const FEIB_BANK_CODE = "805";
 const CONNECTOR_BANK_CODES: ReadonlyMap<string, string> = new Map([
   ["esun", ESUN_BANK_CODE],
   ["cathaybk", CATHAYBK_BANK_CODE],
@@ -25,6 +26,7 @@ const CONNECTOR_BANK_CODES: ReadonlyMap<string, string> = new Map([
   ["megabank", MEGABANK_BANK_CODE],
   ["rakuten", RAKUTEN_BANK_CODE],
   ["fubon", FUBON_BANK_CODE],
+  ["feib", FEIB_BANK_CODE],
 ]);
 const TAIWAN_BANK_NAMES: Record<string, string> = {
   "004": "台灣銀行",
@@ -126,6 +128,11 @@ export function deriveBankMatchKey(
     const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
     return { bankCode: FUBON_BANK_CODE, last4: last4 || null };
   }
+  if (connectorId === "feib" && sourceId.startsWith("bank:feib:")) {
+    // sourceId 為 bank:feib:<末四碼>:<帳號雜湊>:<幣別>，不含完整帳號。
+    const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
+    return { bankCode: FEIB_BANK_CODE, last4: last4 || null };
+  }
   if (connectorId === "rakuten" && sourceId.startsWith("bank:rakuten:")) {
     const last4 = sourceId.split(":")[2]?.replace(/\D/g, "").slice(-4) ?? "";
     return { bankCode: RAKUTEN_BANK_CODE, last4: last4 || null };
@@ -140,13 +147,42 @@ export function deriveBankMatchKey(
 export function normalizeBankAccountDisplay<T extends BankDisplayRow>(
   row: T,
 ): T {
+  if (row.connectorId === "ctbc" && row.accountType === "credit")
+    return { ...row, accountName: "中國信託信用卡" };
   return row.accountType === "credit" ? row : normalizeDepositDisplay(row);
 }
 
-export function normalizeBankTransactionDisplay<T extends BankDisplayRow>(
-  row: T,
-): T {
-  return row.accountType === "credit" ? row : normalizeDepositDisplay(row);
+export function normalizeBankTransactionDisplay<
+  T extends BankDisplayRow & { cardLast4?: unknown; cardMetadata?: unknown },
+>(row: T) {
+  // Internal lookup metadata must never become part of the public API response.
+  const { cardLast4, cardMetadata, ...display } = row;
+  if (row.connectorId === "ctbc" && row.accountType === "credit") {
+    return { ...display, accountName: ctbcCardLabel(cardLast4, cardMetadata) };
+  }
+  return row.accountType === "credit"
+    ? display
+    : normalizeDepositDisplay(display);
+}
+
+function ctbcCardLabel(suffix: unknown, metadata: unknown): string {
+  const unknownCard = "未辨識卡片";
+  if (typeof suffix !== "string" || !/^\d{4}$/.test(suffix)) return unknownCard;
+  if (typeof metadata !== "string") return unknownCard;
+  try {
+    const cards: unknown = JSON.parse(metadata);
+    if (!Array.isArray(cards)) return unknownCard;
+    const matches = cards.filter(
+      (card) => card && typeof card === "object" && card.cardLast4 === suffix,
+    );
+    // Even identical duplicate suffixes cannot prove a unique physical card.
+    if (matches.length !== 1) return unknownCard;
+    const name: unknown = matches[0].cardName;
+    if (typeof name !== "string" || !name.trim()) return unknownCard;
+    return `${name.trim()} · ${suffix}`;
+  } catch {
+    return unknownCard;
+  }
 }
 
 function normalizeDepositDisplay<T extends BankDisplayRow>(row: T): T {
@@ -201,6 +237,8 @@ function parseBankAccountSource(sourceId: string): {
   if (megabank) return { bankCode: MEGABANK_BANK_CODE, account: megabank[1] };
   const fubon = sourceId.match(/^bank:fubon:([^:]+)/);
   if (fubon) return { bankCode: FUBON_BANK_CODE, account: fubon[1] };
+  const feib = sourceId.match(/^bank:feib:([^:]+)/);
+  if (feib) return { bankCode: FEIB_BANK_CODE, account: feib[1] };
   const rakuten = sourceId.match(/^bank:rakuten:([^:]+)/);
   if (rakuten) return { bankCode: RAKUTEN_BANK_CODE, account: rakuten[1] };
   return {};
