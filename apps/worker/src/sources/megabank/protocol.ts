@@ -6,6 +6,7 @@ import type {
 } from "../financial-types";
 import { z } from "zod";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { creditCardLiabilityBalance } from "../credit-card-liability";
 
 export const megabankConfigSchema = z.object({
   userId: z.string().min(1).optional(),
@@ -276,6 +277,7 @@ export function parseMegabankData(
         currency,
         description,
         status: pending ? "pending" : "posted",
+        cardLast4: last4(cardNo) || undefined,
         raw: { cardLast4: last4(cardNo) },
       });
     }
@@ -343,7 +345,7 @@ export function parseMegabankData(
     bankBalanceSnapshots.push({
       accountId,
       sourceId: `${accountId}:${asOfAt}`,
-      balance: -(billed + unbilled),
+      balance: creditCardLiabilityBalance(billed, unbilled),
       statementBalance: billed,
       currency,
       asOfAt,

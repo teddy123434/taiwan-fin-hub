@@ -7,6 +7,7 @@ import type {
 import forge from "node-forge";
 import { z } from "zod";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { creditCardLiabilityBalance } from "../credit-card-liability";
 
 // Only the state needed to resume this login is retained, encrypted. A snapshot
 // expires within five minutes; bank response payloads and OTP are not retained.
@@ -148,7 +149,15 @@ export function parseCtbcData(
   );
   const cardAccounts = buildCreditCardAccounts(cardCurrencies, cardMetadata);
   bankAccounts.push(...cardAccounts);
-  bankBalanceSnapshots.push(...buildCreditCardSnapshots(selectedGroups, now));
+  bankBalanceSnapshots.push(
+    ...buildCreditCardSnapshots(
+      selectedGroups,
+      payloads.unbilled === undefined
+        ? undefined
+        : unbilledTotals(unbilledTransactions),
+      now,
+    ),
+  );
 
   const creditCardBills = selectedGroups.map((group) => ({
     accountId: creditCardSourceId(group.currency),
@@ -166,11 +175,17 @@ export function parseCtbcData(
     currency: group.currency,
     raw: sanitizeCreditCardGroup(group),
   }));
+  const cardNames = uniqueCardNames(cardMetadata);
   bankTransactions.push(
     ...reconcileCreditCardLifecycle(
       [...parseCreditCardTransactions(selectedGroups), ...unbilledTransactions],
       realtimeTransactions,
-    ),
+    ).map((transaction) => ({
+      ...transaction,
+      cardName: transaction.cardLast4
+        ? cardNames.get(transaction.cardLast4)
+        : undefined,
+    })),
   );
 
   return {
@@ -336,9 +351,9 @@ function buildCreditCardAccounts(
   return currencies.map((currency) => ({
     sourceId: creditCardSourceId(currency),
     institutionName: "中國信託商業銀行",
-    accountName:
-      metadata[0]?.cardName ||
-      `${metadata[0]?.positiveOrAttached || ""}中國信託信用卡`.trim(),
+    // One account per currency holds every card's shared bill; individual
+    // cards are identified on transactions, not by the first card's name.
+    accountName: "中國信託信用卡",
     accountType: "credit" as const,
     currency,
     raw: {
@@ -351,29 +366,73 @@ function buildCreditCardAccounts(
   }));
 }
 
-function buildCreditCardSnapshots(groups: CreditCardGroup[], now: Date) {
+/** 各幣別已入帳未結帳的消費淨額（正數為欠款），不含繳款；授權另計不納入。 */
+function unbilledTotals(transactions: CtbcCardTransactionCandidate[]) {
+  const totals = new Map<string, number>();
+  for (const transaction of transactions) {
+    if (
+      transaction.amount > 0 &&
+      /繳款|扣繳|自扣|payment/i.test(transaction.description ?? "")
+    )
+      continue;
+    totals.set(
+      transaction.currency,
+      (totals.get(transaction.currency) ?? 0) - transaction.amount,
+    );
+  }
+  return totals;
+}
+
+function buildCreditCardSnapshots(
+  groups: CreditCardGroup[],
+  unbilled: Map<string, number> | undefined,
+  now: Date,
+) {
   const newestByCurrency = new Map<string, CreditCardGroup>();
   for (const group of groups.sort(compareCreditCardGroups)) {
     if (!newestByCurrency.has(group.currency))
       newestByCurrency.set(group.currency, group);
   }
-  return Array.from(newestByCurrency.values()).map((group) => {
-    const remainingDue = remainingDueForGroup(group);
-    const sourceId = creditCardSourceId(group.currency);
-    return {
+  const snapshots: Array<Omit<BankBalanceSnapshot, "id" | "connectorId">> =
+    Array.from(newestByCurrency.values()).map((group) => {
+      const remainingDue = remainingDueForGroup(group);
+      const sourceId = creditCardSourceId(group.currency);
+      return {
+        accountId: sourceId,
+        sourceId: `${sourceId}:${now.toISOString()}`,
+        balance: creditCardLiabilityBalance(
+          remainingDue ?? 0,
+          unbilled?.get(group.currency) ?? 0,
+        ),
+        statementBalance: group.statementAmount,
+        availableBalance: undefined,
+        paymentDueDate: group.paymentDueDate,
+        statementClosingDate: group.statementClosingDate,
+        noPaymentNeeded: remainingDue == null ? undefined : remainingDue === 0,
+        currency: group.currency,
+        asOfAt: now.toISOString(),
+        raw: sanitizeCreditCardGroup(group),
+      };
+    });
+  // 尚無帳單的幣別只有未出帳消費，負債即未出帳總額。
+  for (const [currency, amount] of unbilled ?? []) {
+    if (newestByCurrency.has(currency)) continue;
+    const sourceId = creditCardSourceId(currency);
+    snapshots.push({
       accountId: sourceId,
       sourceId: `${sourceId}:${now.toISOString()}`,
-      balance: remainingDue == null ? 0 : -Math.abs(remainingDue),
-      statementBalance: group.statementAmount,
+      balance: creditCardLiabilityBalance(0, amount),
+      statementBalance: undefined,
       availableBalance: undefined,
-      paymentDueDate: group.paymentDueDate,
-      statementClosingDate: group.statementClosingDate,
-      noPaymentNeeded: remainingDue == null ? undefined : remainingDue === 0,
-      currency: group.currency,
+      paymentDueDate: undefined,
+      statementClosingDate: undefined,
+      noPaymentNeeded: undefined,
+      currency,
       asOfAt: now.toISOString(),
-      raw: sanitizeCreditCardGroup(group),
-    };
-  });
+      raw: { currency, unbilledAmount: amount },
+    });
+  }
+  return snapshots;
 }
 
 function parseCreditCardTransactions(groups: CreditCardGroup[]) {
@@ -426,6 +485,7 @@ function parseCreditCardTransactions(groups: CreditCardGroup[]) {
         description,
         counterparty: description,
         status: "posted",
+        cardLast4: transactionCardLast4(bill),
         raw: sanitizeCreditCardTransaction(bill),
         matchKey,
         identityKey,
@@ -481,6 +541,7 @@ function parseRealtimeTransactions(payload: unknown) {
         description,
         counterparty: description,
         status: "pending",
+        cardLast4: transactionCardLast4(value),
         raw: sanitizeRealtimeTransaction(value),
         matchKey,
         identityKey: [
@@ -539,6 +600,7 @@ function parseUnbilledTransactions(payload: unknown) {
         description,
         counterparty: description,
         status: "posted",
+        cardLast4: transactionCardLast4(value),
         raw: sanitizeCreditCardTransaction(value),
         matchKey,
         identityKey: [
@@ -701,11 +763,29 @@ function cardMetadataSuffix(value: JsonRecord) {
   return suffix ?? masked;
 }
 
-function transactionDisplaySuffix(value: JsonRecord) {
+// Conflicting card number fields leave the card unknown rather than guessed.
+function transactionCardLast4(value: JsonRecord) {
   const candidates = [value.cardNoSuffixFour, value.cardNo, value.fullCardNo]
     .map(displayCardLast4)
     .filter((suffix): suffix is string => !!suffix);
-  return new Set(candidates).size === 1 ? candidates[0] : null;
+  return new Set(candidates).size === 1 ? candidates[0] : undefined;
+}
+
+// Even identical duplicate suffixes cannot prove a unique physical card.
+function uniqueCardNames(
+  metadata: Array<{ cardLast4?: string; cardName?: string }>,
+) {
+  const counts = new Map<string, number>();
+  for (const card of metadata)
+    if (card.cardLast4)
+      counts.set(card.cardLast4, (counts.get(card.cardLast4) ?? 0) + 1);
+  return new Map(
+    metadata.flatMap((card) =>
+      card.cardLast4 && card.cardName && counts.get(card.cardLast4) === 1
+        ? [[card.cardLast4, card.cardName] as const]
+        : [],
+    ),
+  );
 }
 
 function parseCardMetadata(payload: unknown) {
@@ -772,7 +852,6 @@ function sanitizeCreditCardGroup(group: CreditCardGroup) {
 
 function sanitizeCreditCardTransaction(value: JsonRecord) {
   return {
-    displayCardLast4: transactionDisplaySuffix(value),
     purchaseDt: normalizeCardDate(value.purchaseDt),
     postingDt: normalizeCardDate(value.postingDt),
     clearingDt: normalizeCardDate(value.clearingDt),
@@ -794,7 +873,6 @@ function sanitizeCreditCardTransaction(value: JsonRecord) {
 
 function sanitizeRealtimeTransaction(value: JsonRecord) {
   return {
-    displayCardLast4: transactionDisplaySuffix(value),
     authorizationHash: authorizationHash(value.authCode),
     txnCountry: optionalString(value.txnCountry),
     origCurCode: normalizeCurrency(value.origCurCode ?? value.origCurCo),

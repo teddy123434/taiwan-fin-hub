@@ -8,6 +8,7 @@ import forge from "node-forge";
 import { z } from "zod";
 import { isNoCreditCardMessage } from "../credit-card-status";
 import { BANK_SYNC_MONTHS } from "../sync-window";
+import { creditCardLiabilityBalance } from "../credit-card-liability";
 
 export const FUBON_BANK_CODE = "012";
 export const FUBON_CAPTCHA_DIGIT_COUNT = 6;
@@ -1690,7 +1691,10 @@ function parseCreditCards(
       ? {
           accountId: FUBON_CREDIT_ACCOUNT_ID,
           sourceId: `snapshot:fubon:credit:${snapshotDate}`,
-          balance: roundCurrency(-(status.remainingAmount + unbilled.total)),
+          balance: creditCardLiabilityBalance(
+            status.remainingAmount,
+            unbilled.total,
+          ),
           statementBalance: status.statementAmount,
           statementClosingDate: status.statementClosingDate,
           paymentDueDate: status.paymentDueDate,
@@ -1748,6 +1752,7 @@ function cardTransactions(
       currency: "TWD",
       description: maskFubonText(row.description) || "台北富邦信用卡",
       status,
+      cardLast4: row.cardLast4,
       raw: {
         cardLast4: row.cardLast4,
         bankPostedDate: row.postedDate,
