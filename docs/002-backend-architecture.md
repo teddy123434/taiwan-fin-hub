@@ -256,7 +256,7 @@ Middleware 應只處理跨功能的 request concern，不應承擔 feature 商�
 
 實體目錄集中不改變相依邊界：`sync.ts` 可依賴 connector、protocol、client、repository 與明確的共用 service；protocol／client 不得依賴 Hono、D1、Worker `Env`、adapter 或同步流程，也不得直接寫入資料庫。來源之間不引用彼此的內部實作。
 
-`sources` 根目錄只保留跨來源使用的能力：`browser.ts` 管 browser acquisition、capacity 錯誤、登入前頁面停滯復原與有期限的 session 清理，`types.ts` 定義後端 `Connector`／`SyncResult`，`financial-types.ts` 定義 connector 正規化後的金融資料（`BankAccount`、`BankTransaction`、`CreditCardBill`、`Invoice` 等），`sync-window.ts`、`credit-card-status.ts` 與 `captcha-retry.ts`（API 型來源的自動驗證碼重試）提供共同 policy／判斷。`config-registry.ts` 直接引用各來源的純 schema，供設定 feature 使用；同步 handler 仍由 `features/sync/registry.ts` 組裝。Worker 與測試直接引用來源檔案，不建立跨來源的實作匯出入口。
+`sources` 根目錄只保留跨來源使用的能力：`browser.ts` 管 browser acquisition、capacity 錯誤、登入前頁面停滯復原與有期限的 session 清理，`sync-error.ts` 定義來源錯誤宣告對外錯誤代碼的介面，`types.ts` 定義後端 `Connector`／`SyncResult`，`financial-types.ts` 定義 connector 正規化後的金融資料（`BankAccount`、`BankTransaction`、`CreditCardBill`、`Invoice` 等），`sync-window.ts`、`credit-card-status.ts` 與 `captcha-retry.ts`（API 型來源的自動驗證碼重試）提供共同 policy／判斷。`config-registry.ts` 直接引用各來源的純 schema、設定頁 session 狀態判斷與身分欄位重設規則，供設定 feature 使用；同步 handler 仍由 `features/sync/registry.ts` 組裝。Worker 與測試直接引用來源檔案，不建立跨來源的實作匯出入口。
 
 Browser 登入前復原最多三次嘗試，只包住頁面與驗證碼準備；OCR、送出登入與資料查詢留在來源 adapter，政策細節見 `docs/004-connector-development.md`。
 
@@ -270,7 +270,7 @@ Browser 登入前復原最多三次嘗試，只包住頁面與驗證碼準備；
 - 銀行與信用卡帳單 API response contract。
 - 設定頁的排程、連接器設定狀態與分類規則 API response contract，以及排程間隔、分類規則欄位與比對方式的允許值。
 - 活動配對、去重、排序與資料組裝。
-- 近期繳款提醒（`payment-reminders.ts`）：總覽「值得留意」與預設排程推播共用同一套到期與繳款狀態判斷。
+- 近期繳款提醒（`payment-reminders.ts`）：總覽「值得留意」與預設排程推播共用同一套到期、繳款狀態與扣款帳戶餘額判斷。
 
 不得將 Hono `Context`、D1 row 或 Puppeteer object 放入共用契約。
 
@@ -466,6 +466,7 @@ API error 統一為：
 - 外部 connector 暫時無法使用。
 
 Service 應使用明確的 error class 表示，route 再映射成固定 HTTP status 與 error code。
+來源錯誤需要穩定代碼或使用者處理狀態時，由錯誤類別實作 `sources/sync-error.ts` 的 `SourceSyncErrorSource`，以 `toSyncError()` 宣告 HTTP status、代碼、`Retry-After` 秒數，以及同步結果是否為 `needs_user_action`；子類別未覆寫時沿用父類別的分類。未實作的錯誤代碼為 `SYNC_FAILED`，狀態由 `isUserActionError` 依錯誤訊息判斷。`classifySyncError` 與 `isUserActionError` 只直接處理同步流程本身的錯誤，不逐一引用來源錯誤。
 
 所有錯誤代碼集中宣告於 `shared/api/errors.ts`。`jsonError`、`validationHook` 只接受 `ApiErrorCode`；`classifySyncError`、`SyncFailureInput` 與手動同步 run 的結案只接受 `SyncErrorCode`，讀出 sync job 與 run 的 errorCode 時也標為同一型別。新增或改名代碼須先修改共用型別，前端依代碼接續流程的比對會在型別檢查時一併驗證。
 
@@ -569,13 +570,24 @@ X-Next-Cursor: <opaque-cursor>
   達到上限或 Workers AI 回傳 `3036`（免費額度用完）時暫停到 UTC 隔日 00:00，由 Cron 繼續；暫時性錯誤留待 Cron 恢復；其他錯誤保存為無法判斷，避免重複重試。
 - Demo 模式不啟動掃描，訊息直接 ack。
 
+## 信用卡與貸款扣款帳戶
+
+信用卡與貸款可指定一個扣款帳戶，供繳款提醒判斷可用餘額是否足夠（判斷規則見 `shared/payment-reminders.ts` 與前端文件「總覽繳款提醒」）。
+
+- 銀行提供：connector 以 `BankAccount.autopayAccount` 回報銀行頁面揭露的自動扣繳帳戶，寫入 `bank_accounts` 的 `autopay_status`（`enabled`／`none`）、`autopay_bank_code`、`autopay_account_last4` 與 `autopay_account_source_id`。只保存銀行代碼、末四碼與以自家存款相同算法得出的 sourceId，不保存完整帳號。來源本次未取得時（`undefined`）整組保留；有明確結果（含未設定）時整組覆寫，避免新舊銀行代碼與末四碼混用。
+- 自動對應只在唯一時採用：有存款 sourceId 時精準比對；否則需同時符合銀行代碼與末四碼。對不到或不只一個候選時不帶入，由使用者手動指定。
+- 銀行完全沒提供扣款資料（`autopay_status` 為 NULL）時，以同一資料來源（同銀行）唯一的同幣別可扣款帳戶推測（`inferred`）；有多個候選時不推測。銀行明確顯示未設定，或提供的帳戶對不到時也不推測，避免誤用其他帳戶的餘額而隱藏提醒。
+- 手動設定存於 `bank_account_payment_accounts`，優先於銀行資料；`payment_account_id` 為 NULL 表示明確「不指定」。指定的帳戶已不存在或不再符合條件時，退回銀行資料。此表的兩個帳戶 ID 都不設 FK：帳戶被移除或合併時視為未設定，不阻擋同步資料清理，也不以 CASCADE 悄悄刪除使用者設定。
+- 扣款帳戶須是同幣別、非信用卡／貸款／定存／儲值的帳戶。`PUT /api/bank/accounts/:id/payment-account`（`{ paymentAccountId: string | null }`）寫入手動設定，`DELETE` 同路徑移除手動設定、改回銀行資料；對象不是有效的信用卡或貸款時回 `BANK_ACCOUNT_NOT_FOUND`（404），扣款帳戶不符合條件時回 `INVALID_PAYMENT_ACCOUNT`（400）。
+- 帳戶 API（`/api/bank/accounts`、`/api/bank`）的信用卡與貸款附上 `paymentAccountId`、`paymentAccountSource`（`manual`／`bank`／`inferred`）與 `bankAutopay`；銀行資料的內部欄位不回傳。
+
 ## 讀取 API 效能
 
 線上讀取耗時主要來自 D1 往返與冷啟動，個別查詢的執行時間通常只有數毫秒。
 因此優先減少每頁請求數與循序 D1 往返，再處理查詢本身。
 `wrangler.toml` 已開啟 `observability.traces`，可在 Workers trace 檢視 D1 與對外 fetch 的耗時。
 
-- 只需帳戶與餘額的頁面使用 `GET /api/bank/accounts`，不載入交易、轉帳配對與分類。
+- 只需帳戶與餘額的頁面使用 `GET /api/bank/accounts`，不載入交易、轉帳配對與分類。信用卡帳戶另附 `recentCards`：以一次 GROUP BY 取近 90 天交易出現過的卡號末四碼與卡名（同一末四碼採最近一次有卡名的名稱），依最近使用排序；只供顯示，不是完整卡片清單。
 - 資料來源卡片的設定狀態沿用 `/api/sync-jobs` 的 `configured`；開啟連接器詳情時才讀取 `/api/connectors/:connectorId/settings`。
 - `GET /api/activity/invoice-mappings` 接受與其他區間 API 相同的 `from`／`to` 月份。發票與交易必須同一個台北日才能連結，因此頁面只讀取區間內發票的決定；未帶區間時回傳全部。
 - 銀行交易分類時，分類規則與第一輪查詢並行，當頁交易的分類覆寫、轉帳候選與退費原消費候選並行；只有頁面外的候選需要再查一次覆寫。退費候選依信用卡帳戶走 `idx_bank_transactions_account_posted_date`，只在當頁有信用卡正數交易時查詢。
@@ -629,6 +641,7 @@ sources/
 ├── browser.ts
 ├── types.ts
 ├── config-registry.ts
+├── sync-error.ts              # 來源錯誤的對外錯誤代碼介面
 ├── sync-window.ts
 ├── captcha-retry.ts
 ├── credit-card-status.ts
@@ -673,22 +686,22 @@ sources/
 
 根目錄共用檔案的責任如下：
 
-| 檔案                                             | 責任                                                                                                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `route.ts`                                       | 手動同步 API 與 request validation；同步錯誤回應交由 `error-response.ts`。                                                                 |
-| `error-response.ts`                              | 將 connector-specific 錯誤分類為 HTTP status、錯誤代碼、脫敏訊息與 `Retry-After`；HTTP 回應與背景 run 結果共用同一份分類。                 |
-| `manual-sync.ts`                                 | 一般銀行手動同步的 lock、狀態更新與已結案排程報告修復協調；也負責背景手動同步的排入與 Queue 執行。                                         |
-| `manual-run-repository.ts`                       | `manual_sync_runs` 的建立／取得 active run 與條件式狀態轉換；轉為 running 前必須持有 canonical connector lock。                            |
-| `registry.ts`                                    | 從共用 catalog 驗證 scope，dispatch 單次同步與 challenge handler；電子發票與集保的 `run` 明確拒絕單次同步，入口必須使用各自的 Queue 流程。 |
-| `types.ts`                                       | 同步 scope、scope 常數與 outcome 型別。                                                                                                    |
-| `config.ts`、`connector-state.ts`                | 取得設定、加密敏感欄位，區分公開偏好、敏感 session 與安全 cursor。                                                                         |
-| `connector-repository.ts`                        | 共用設定／cursor 寫入、設定版本 guard 與跨來源帳戶關聯；銀行專用修復放在來源目錄。                                                         |
-| `lock.ts`、`errors.ts`                           | 共用 lease／heartbeat、使用者操作判定與錯誤訊息／log 脫敏。                                                                                |
-| `execution.ts`、`run-state.ts`                   | 每次同步的期限、失鎖取消、D1 owner guard，以及 durable run 的停滯／重試狀態。                                                              |
-| `record-mapper.ts`、`persistence.ts`             | 將 connector result 轉成 write record，透過 staging table 與 D1 batch 寫入正式資料表。                                                     |
-| `card-authorization-matching.ts`                 | 依正規化的帳戶、卡片、消費日、幣別與正負金額，按穩定順序逐一配對授權與明細；不依賴 D1 或來源協定。                                         |
-| `card-authorization-write.ts`                    | 共用配對保存、可靠時刻與分類／排除／發票移轉；合併歷史候選、排除既有關係，晚到的舊識別更新已建立的目標。                                   |
-| `transaction-merge.ts`、`card-reconciliation.ts` | 共用舊交易合併與單卡摘要帳戶修復；保留使用者偏好、分類與發票關聯。                                                                         |
+| 檔案                                             | 責任                                                                                                                                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `route.ts`                                       | 手動同步 API 與 request validation；同步錯誤回應交由 `error-response.ts`。                                                                                                                             |
+| `error-response.ts`                              | 將同步錯誤分類為 HTTP status、錯誤代碼、脫敏訊息與 `Retry-After`；來源錯誤讀取其 `toSyncError()`，HTTP 回應與背景 run 結果共用同一份分類。                                                             |
+| `manual-sync.ts`                                 | 一般銀行手動同步的 lock、狀態更新與已結案排程報告修復協調；也負責背景手動同步的排入與 Queue 執行。                                                                                                     |
+| `manual-run-repository.ts`                       | `manual_sync_runs` 的建立／取得 active run 與條件式狀態轉換；轉為 running 前必須持有 canonical connector lock。                                                                                        |
+| `registry.ts`                                    | 從共用 catalog 驗證 scope，dispatch 單次同步與 challenge handler，並提供有 challenge 的來源清單與驗證碼失敗代碼供 route 註冊；電子發票與集保的 `run` 明確拒絕單次同步，入口必須使用各自的 Queue 流程。 |
+| `types.ts`                                       | 同步 scope、scope 常數與 outcome 型別。                                                                                                                                                                |
+| `config.ts`、`connector-state.ts`                | 取得設定、加密敏感欄位，區分公開偏好、敏感 session 與安全 cursor。                                                                                                                                     |
+| `connector-repository.ts`                        | 共用設定／cursor 寫入、設定版本 guard 與跨來源帳戶關聯；銀行專用修復放在來源目錄。                                                                                                                     |
+| `lock.ts`、`errors.ts`                           | 共用 lease／heartbeat、使用者操作判定與錯誤訊息／log 脫敏。                                                                                                                                            |
+| `execution.ts`、`run-state.ts`                   | 每次同步的期限、失鎖取消、D1 owner guard，以及 durable run 的停滯／重試狀態。                                                                                                                          |
+| `record-mapper.ts`、`persistence.ts`             | 將 connector result 轉成 write record，透過 staging table 與 D1 batch 寫入正式資料表。                                                                                                                 |
+| `card-authorization-matching.ts`                 | 依正規化的帳戶、卡片、消費日、幣別與正負金額，按穩定順序逐一配對授權與明細；不依賴 D1 或來源協定。                                                                                                     |
+| `card-authorization-write.ts`                    | 共用配對保存、可靠時刻與分類／排除／發票移轉；合併歷史候選、排除既有關係，晚到的舊識別更新已建立的目標。                                                                                               |
+| `transaction-merge.ts`、`card-reconciliation.ts` | 共用舊交易合併與單卡摘要帳戶修復；保留使用者偏好、分類與發票關聯。                                                                                                                                     |
 
 Worker 的 `sources/<connectorId>/sync.ts` 負責設定解密、connector 呼叫與同步資料寫入；單次銀行流程也處理互動式 challenge，override 型別與來源 colocate。`ctbc/authorizations.ts` 管信用卡授權合併，`hncb/repository.ts` 管華南舊交易／帳戶修復，`nextbank/deposits.ts` 與 `obank/time-deposits.ts` 管存款生命週期。共用同步管理留在 `features/sync`，來源之間共用的外部取資料工具留在 `sources` 根目錄。
 
@@ -874,8 +887,8 @@ connector lock 保留到報告結果寫入及 run 成功結案；失敗的 run t
 
 預設排程批次的摘要推播會附上近期繳款提醒（偏好 `paymentDue`，預設開啟），不另外送出繳款推播。service 以銀行 service 讀取帳戶與近三個月帳單，交給共用的 `collectPaymentReminders` 判斷；讀取失敗只記錄 log，照常送出原本的同步摘要。
 
-- 內容只寫機構、帳戶類型與天數（例如「國泰世華信用卡明天到期」），最多列兩筆，不含金額；狀態未確定或已過期限時加註「請確認是否已繳」，貸款加註「請確認餘額」，與總覽一致。成功摘要改為「同步完成，N 筆繳款即將到期」並導向總覽；有失敗或需處理時沿用原標題，於內文附上繳款提醒。
-- 同步狀態本來就會推播時附上所有提醒；該狀態的通知關閉時，只有今天或明天到期、扣款未完成或已過期限的提醒會讓推播照樣送出。此時同步成功沿用「同步完成，N 筆繳款即將到期」；同步失敗或需處理則只送繳款內容，不帶出使用者已關閉的同步狀態。是否送出只依當下資料判斷，不另外記錄已提醒的帳單。
+- 內容只寫機構、帳戶類型與天數（例如「國泰世華信用卡明天到期」），最多列兩筆，不含金額；狀態未確定或已過期限時加註「請確認是否已繳」，貸款加註「請確認餘額」，與總覽一致。扣款帳戶餘額不足時寫「台新銀行帳戶餘額可能不足以扣繳國泰世華信用卡」，只寫機構名稱，不含帳號末碼與差額；夠扣而隱藏的提醒不列入。成功摘要改為「同步完成，N 筆繳款即將到期」並導向總覽；有失敗或需處理時沿用原標題，於內文附上繳款提醒。
+- 同步狀態本來就會推播時附上所有提醒；該狀態的通知關閉時，只有今天或明天到期、扣款未完成、扣款帳戶餘額不足或已過期限的提醒會讓推播照樣送出。此時同步成功沿用「同步完成，N 筆繳款即將到期」；同步失敗或需處理則只送繳款內容，不帶出使用者已關閉的同步狀態。是否送出只依當下資料判斷，不另外記錄已提醒的帳單。
 - 手動同步與自訂排程的逐工作推播不附繳款提醒，避免同一天重複。
 
 使用預設排程（`schedule_mode = inherit`）的工作採「一輪一批次」。沒有進行中的批次且至少一個繼承工作到期時，scheduler 會以單一 D1 batch transaction 建立 header，並固定快照當下所有啟用且不需使用者處理的繼承工作。批次進行期間，每次 Queue consumer invocation 只從尚未完成的固定成員中挑選一個目前未鎖定且不需使用者處理的工作；已完成的成員不會在同一輪再次執行，新啟用的工作則等下一輪。排程結果會在釋放 connector lock 前直接寫入成員，避免重複 Queue 訊息遺漏結果；停用、改為自訂排程或進入 `needs_user_action` 的非執行中成員會被略過。只有所有固定成員都有結果或被略過時，scheduler 才以條件式更新取得一次推播發送權並關閉批次，下一輪才能建立。建立新輪次時會清理超過 30 天的已結案批次。手動同步不完成或改寫進行中的批次成員；自訂排程維持逐工作推播。
@@ -995,7 +1008,7 @@ Connector 不得直接寫入金融資料表。
 新增 connector 必須遵循 [`docs/004-connector-development.md`](004-connector-development.md)。核心步驟包括：
 
 1. 在 `connectorCatalog` 宣告 ID、連接模式、scope、資料能力與設定欄位分類。
-2. 在 `apps/worker/src/sources/<connectorId>` 建立 `protocol.ts`、必要的 client 與 parser，並在 `sources/config-registry.ts` 的 `connectorConfigSchemas` 註冊 config schema。
+2. 在 `apps/worker/src/sources/<connectorId>` 建立 `protocol.ts`、必要的 client 與 parser，並在 `sources/config-registry.ts` 的 `connectorConfigSchemas` 註冊 config schema，並在 `connectorSessionDescriptors` 註冊設定頁 session 狀態判斷。
 3. 需要 Worker binding 時，在同一來源目錄建立 `connector.ts` adapter。
 4. 在同一來源目錄的 `sync.ts` 組合共用 record mapping 與 staged persistence 寫入；來源專用的配對與修復放在相鄰檔案。
 5. 在 `connectorRuntimeRegistry` 註冊手動／排程同步與 challenge handler。
