@@ -5,6 +5,7 @@ import {
 } from "../../db";
 import { eq } from "drizzle-orm";
 import type { ConnectorId } from "@taiwan-fin-hub/shared";
+import { bankConnectorIds } from "../../sources/deposit-source-registry";
 
 export async function updateConnectorEncryptedConfig(
   db: D1Database,
@@ -139,35 +140,18 @@ export function connectorCursorStatement(
     .bind(cursor, now, connectorId);
 }
 
-const DIRECT_DEPOSIT_CONNECTOR_IDS = [
-  "esun",
-  "cathaybk",
-  "sinopac",
-  "taishin",
-  "ctbc",
-  "skbank",
-  "obank",
-  "hncb",
-  "firstbank",
-  "kgibank",
-  "megabank",
-  "rakuten",
-  "fubon",
-  "feib",
-] as const satisfies readonly ConnectorId[];
-
 export function linkCanonicalBankAccountsStatement(
   db: D1Database,
   settingsGuard?: { connectorId: ConnectorId; encryptedConfig: string },
 ) {
-  const directConnectorPlaceholders = DIRECT_DEPOSIT_CONNECTOR_IDS.map(
-    (_, index) => `?${index + 1}`,
-  ).join(", ");
+  const directConnectorPlaceholders = bankConnectorIds
+    .map((_, index) => `?${index + 1}`)
+    .join(", ");
   const settingsGuardSql = settingsGuard
     ? ` AND EXISTS (
         SELECT 1 FROM connector_settings
-        WHERE connector_id = ?${DIRECT_DEPOSIT_CONNECTOR_IDS.length + 1}
-          AND encrypted_config = ?${DIRECT_DEPOSIT_CONNECTOR_IDS.length + 2}
+        WHERE connector_id = ?${bankConnectorIds.length + 1}
+          AND encrypted_config = ?${bankConnectorIds.length + 2}
       )`
     : "";
   return db
@@ -187,31 +171,9 @@ export function linkCanonicalBankAccountsStatement(
       AND account_last4 IS NOT NULL${settingsGuardSql}`,
     )
     .bind(
-      ...DIRECT_DEPOSIT_CONNECTOR_IDS,
+      ...bankConnectorIds,
       ...(settingsGuard
         ? [settingsGuard.connectorId, settingsGuard.encryptedConfig]
         : []),
     );
-}
-
-export function deactivateMissingCathayLoanAccountsStatement(
-  db: D1Database,
-  activeSourceIds: readonly string[],
-  now: string,
-) {
-  return db
-    .prepare(
-      `UPDATE bank_accounts
-       SET inactive_at = ?, updated_at = ?
-       WHERE connector_id = 'cathaybk'
-         AND account_type = 'loan'
-         AND source_id LIKE 'loan:cathaybk:%'
-         AND inactive_at IS NULL
-         AND NOT EXISTS (
-           SELECT 1
-           FROM json_each(?) active
-           WHERE active.value = bank_accounts.source_id
-         )`,
-    )
-    .bind(now, now, JSON.stringify(activeSourceIds));
 }

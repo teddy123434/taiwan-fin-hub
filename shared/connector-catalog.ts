@@ -13,6 +13,7 @@ export type ConnectorCapability =
   | "bank_balance_snapshot"
   | "bank_transaction"
   | "credit_card_bill"
+  | "loan"
   | "investment_position"
   | "investment_transaction"
   | "net_worth_history";
@@ -27,9 +28,14 @@ export interface ConnectorCredentialField {
 export interface ConnectorCatalogEntry {
   id: string;
   title: string;
-  description: string;
+  /**
+   * 直接提供自家存款帳戶的銀行代碼：用於資產依銀行分組，以及集保交割帳戶等其他來源的帳戶連結。
+   * 設定後 Worker 必須註冊該來源的存款 sourceId 解析；非銀行或未接入存款比對的來源為 `null`。
+   */
+  bankCode: string | null;
   connectionMode: ConnectorConnectionMode;
   scopes: readonly string[];
+  /** 前端依此產生來源的支援範圍標籤（例如「存款・信用卡・貸款」），須與實際寫入的資料一致。 */
   capabilities: readonly ConnectorCapability[];
   publicFields: readonly string[];
   credentialFields: readonly ConnectorCredentialField[];
@@ -44,7 +50,7 @@ export const connectorCatalog = {
   einvoice: {
     id: "einvoice",
     title: "電子發票",
-    description: "財政部載具與品項明細",
+    bankCode: null,
     connectionMode: "api_credentials",
     scopes: ["all"],
     capabilities: ["invoice", "invoice_line_item"],
@@ -85,7 +91,7 @@ export const connectorCatalog = {
   tdcc: {
     id: "tdcc",
     title: "集保 e 存摺",
-    description: "持倉、投資交易與銀行帳戶",
+    bankCode: null,
     connectionMode: "api_device_otp",
     scopes: ["all", "investments", "bank", "trades"],
     capabilities: [
@@ -114,7 +120,7 @@ export const connectorCatalog = {
   esun: {
     id: "esun",
     title: "玉山銀行",
-    description: "帳戶、信用卡與交易",
+    bankCode: "808",
     connectionMode: "browser_session",
     scopes: ["all"],
     capabilities: [
@@ -135,7 +141,7 @@ export const connectorCatalog = {
   cathaybk: {
     id: "cathaybk",
     title: "國泰世華銀行",
-    description: "帳戶、信用卡與交易",
+    bankCode: "013",
     connectionMode: "browser_per_sync",
     scopes: ["all"],
     capabilities: [
@@ -143,6 +149,7 @@ export const connectorCatalog = {
       "bank_balance_snapshot",
       "bank_transaction",
       "credit_card_bill",
+      "loan",
     ],
     publicFields: [],
     credentialFields: [
@@ -169,7 +176,7 @@ export const connectorCatalog = {
   sinopac: {
     id: "sinopac",
     title: "永豐行動銀行",
-    description: "臺外幣活存帳戶、餘額與交易；信用卡帳務、帳單與消費",
+    bankCode: "807",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -177,6 +184,7 @@ export const connectorCatalog = {
       "bank_balance_snapshot",
       "bank_transaction",
       "credit_card_bill",
+      "loan",
     ],
     publicFields: [],
     credentialFields: [
@@ -200,7 +208,7 @@ export const connectorCatalog = {
   taishin: {
     id: "taishin",
     title: "台新銀行",
-    description: "臺外幣活存、交易、信用卡帳單與即時消費",
+    bankCode: "812",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -233,7 +241,7 @@ export const connectorCatalog = {
   ctbc: {
     id: "ctbc",
     title: "中國信託銀行",
-    description: "存款帳戶、信用卡與交易",
+    bankCode: "822",
     connectionMode: "api_credentials",
     scopes: ["all"],
     capabilities: [
@@ -256,7 +264,7 @@ export const connectorCatalog = {
   obank: {
     id: "obank",
     title: "王道銀行",
-    description: "活存、定存、餘額與交易明細",
+    bankCode: "048",
     connectionMode: "api_captcha_session",
     scopes: ["all"],
     capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
@@ -276,7 +284,7 @@ export const connectorCatalog = {
   hncb: {
     id: "hncb",
     title: "華南銀行",
-    description: "存款帳戶與餘額；信用卡帳單與刷卡明細",
+    bankCode: "008",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -309,7 +317,7 @@ export const connectorCatalog = {
   skbank: {
     id: "skbank",
     title: "新光銀行",
-    description: "臺外幣帳戶、餘額、交易明細與信用卡帳單",
+    bankCode: "103",
     connectionMode: "api_credentials",
     scopes: ["all"],
     capabilities: [
@@ -330,7 +338,7 @@ export const connectorCatalog = {
   firstbank: {
     id: "firstbank",
     title: "第一銀行",
-    description: "存款帳戶、餘額與交易明細；信用卡帳單與刷卡明細",
+    bankCode: "007",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -365,7 +373,7 @@ export const connectorCatalog = {
   kgibank: {
     id: "kgibank",
     title: "凱基銀行",
-    description: "臺幣活存帳戶、餘額與交易明細",
+    bankCode: "809",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
@@ -386,7 +394,7 @@ export const connectorCatalog = {
   megabank: {
     id: "megabank",
     title: "兆豐銀行",
-    description: "存款帳戶、餘額與交易明細；信用卡帳單與消費；貸款餘額與條件",
+    bankCode: "017",
     connectionMode: "api_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -394,6 +402,7 @@ export const connectorCatalog = {
       "bank_balance_snapshot",
       "bank_transaction",
       "credit_card_bill",
+      "loan",
     ],
     publicFields: [],
     credentialFields: [
@@ -423,7 +432,7 @@ export const connectorCatalog = {
   nextbank: {
     id: "nextbank",
     title: "將來銀行",
-    description: "存款、口袋餘額與交易明細（投資尚未接入）",
+    bankCode: null,
     connectionMode: "api_captcha_session",
     scopes: ["all"],
     capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
@@ -439,10 +448,15 @@ export const connectorCatalog = {
   rakuten: {
     id: "rakuten",
     title: "樂天國際銀行",
-    description: "臺幣活存帳戶、每日餘額、交易明細與貸款餘額／條件",
+    bankCode: "826",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
-    capabilities: ["bank_account", "bank_balance_snapshot", "bank_transaction"],
+    capabilities: [
+      "bank_account",
+      "bank_balance_snapshot",
+      "bank_transaction",
+      "loan",
+    ],
     publicFields: [],
     credentialFields: [
       { key: "userId", label: "身分證字號", type: "text" },
@@ -463,7 +477,7 @@ export const connectorCatalog = {
   fubon: {
     id: "fubon",
     title: "台北富邦銀行",
-    description: "臺外幣活存帳戶、餘額與臺幣交易明細；信用卡帳單與消費",
+    bankCode: "012",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -497,7 +511,7 @@ export const connectorCatalog = {
   feib: {
     id: "feib",
     title: "遠東商銀",
-    description: "臺幣活存帳戶、餘額與交易明細；信用卡帳單與消費",
+    bankCode: "805",
     connectionMode: "browser_captcha_session",
     scopes: ["all"],
     capabilities: [
@@ -519,6 +533,28 @@ export const connectorCatalog = {
       "captchaDigitCount",
       "captcha",
     ],
+  },
+  ubot: {
+    id: "ubot",
+    title: "聯邦 New New Bank",
+    bankCode: "803",
+    connectionMode: "api_credentials",
+    scopes: ["all"],
+    capabilities: [
+      "bank_account",
+      "bank_balance_snapshot",
+      "bank_transaction",
+      "credit_card_bill",
+      "loan",
+    ],
+    publicFields: [],
+    credentialFields: [
+      { key: "userId", label: "身分證字號", type: "text" },
+      { key: "account", label: "使用者代號", type: "text" },
+      { key: "password", label: "使用者密碼", type: "password" },
+    ],
+    secretStateFields: ["deviceUuid"],
+    resetOnCredentialChangeFields: ["deviceUuid"],
   },
 } as const satisfies Record<string, ConnectorCatalogEntry>;
 
@@ -542,4 +578,11 @@ export function compareConnectorOrder(left: ConnectorId, right: ConnectorId) {
 
 export function isConnectorId(value: string): value is ConnectorId {
   return Object.hasOwn(connectorCatalog, value);
+}
+
+/** 資料來源的直接存款銀行代碼；未知來源或沒有宣告時回傳 `null`。 */
+export function connectorBankCode(connectorId: string): string | null {
+  return isConnectorId(connectorId)
+    ? connectorCatalog[connectorId].bankCode
+    : null;
 }
