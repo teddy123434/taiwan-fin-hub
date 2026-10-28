@@ -92,7 +92,6 @@
     rateMap,
   } from "@/shared/format/financial";
   import { recentMonthRange, recentMonthKeys } from "@/shared/date-range";
-  import { swipeBack } from "@/shared/actions/swipe-back";
   let { api }: { api: ApiClient } = $props();
   const initialSelectedMonth = currentActivityMonthKey();
   // Keep API ranges and month options anchored to the same Taipei month key.
@@ -729,6 +728,8 @@
   }
   function openDetail(item: ActivityItem) {
     detailKey = activityKey(item);
+    // 明細有自己的 history entry，返回鍵與 iOS 主畫面 App 的系統右滑都會經 popstate 關閉；
+    // 不要再加自訂右滑，否則兩種手勢會同時拖動畫面。
     window.history.pushState(
       { ...window.history.state, activityDetail: detailKey },
       "",
@@ -1435,11 +1436,6 @@
           aria-modal="true"
           class="relative flex h-full w-full flex-col overflow-hidden bg-card shadow-2xl md:max-w-[32rem]"
           role="dialog"
-          use:swipeBack={{
-            enabled:
-              document.documentElement.classList.contains("is-standalone"),
-            onBack: closeDetail,
-          }}
         >
           <header
             class="flex shrink-0 items-center justify-between border-b border-ink/10 px-4 py-3 md:px-6"
