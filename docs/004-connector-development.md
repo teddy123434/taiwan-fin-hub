@@ -166,6 +166,7 @@ Puppeteer `TimeoutError` 與暫時性 `net::ERR_*` 網路錯誤；被登出、�
 - `BankBalanceSnapshot.accountId`、`BankTransaction.accountId` 與 `CreditCardBill.accountId` 必須等於對應 `BankAccount.sourceId`。
 - 日期使用 ISO 8601；帳單期間使用 `YYYY-MM`；幣別使用大寫代碼。
 - 存款帳戶名稱：銀行提供帳戶種類、別名或暱稱時，以 `sources/deposit-account-name.ts` 的 `depositAccountName` 組成「名稱 末四碼 xxxx」，方便分辨同銀行的多個帳戶；沒有名稱時沿用各來源的預設名稱。API 顯示層（`features/bank/display.ts`）只保留名稱與末碼以空格分隔、且末碼與 sourceId 帳號結尾一致的名稱（定存也不再重複附加末碼），其他名稱改顯示 sourceId 推得的「末四碼／末五碼 xxxx」。目前使用的欄位：台新 `accountTypeName`／`ACCT_TYPE_NAME`、永豐 `AcctText`、國泰 `accountTypeName`、玉山 `alias`、中信 `accountNickName`、兆豐 `NAME`、華南帳戶類別、第一銀行暱稱、新光暱稱或產品名、凱基暱稱或帳戶類別、王道 `aliasName`／`accountName`／`productName`（名稱可能帶完整帳號，先移除 6 碼以上數字再組合）；富邦、遠東商銀沿用既有「類別 末四碼」名稱；彰化銀行為固定的「新臺幣活存／外幣活存 幣別 末四碼」。
+- 貸款帳戶名稱：各來源一律以 `sources/loan-account-name.ts` 的 `loanAccountName` 依 `loanCategory` 組成「信用貸款／房屋貸款／其他貸款 末四碼 xxxx」（分類未知為「貸款」，缺末四碼時只顯示分類），不使用銀行自帶的產品名稱；銀行產品名稱如需保留，寫入 `raw.productName`。
 - `BankTransaction.authorizedAt` 與 `Invoice.invoiceDate`：來源只有日期時使用 `YYYY-MM-DD`；來源確實提供時間時使用含明確時區的 ISO timestamp。不得以補上的午夜或同步時間假造交易時間；台灣來源未標時區的交易時間以 `+08:00` 解讀。
 - 補充交易時間時須保留既有 `sourceId` 算法；`postedDate` 維持入帳日期用途。未入帳轉已入帳或重新同步只提供日期時，須保留同筆交易原有的可靠時間。
 - 多張卡共用一個信用卡帳戶時，以 `BankTransaction.cardLast4` 標示實際刷卡的末四碼；只有能唯一對應到具名卡片時才填 `cardName`，無法確定就留空，不猜測。兩者只供顯示（交易帳戶名稱顯示為「卡名 · 末四碼」，缺卡名時為「帳戶名稱 · 末四碼」），不得納入 `sourceId`、配對或負債計算，也不改變帳戶與帳單的拆分方式。
@@ -538,26 +539,26 @@ OTP 通過後，國泰可能先顯示「密碼已超過半年未更新」提醒�
 外幣先沿用總覽的 `fxAcctSummaryResponse`，缺少時查 `/twrbm-fx/qu001/010`，再用 `/twrbm-fx/qu002/010`、`/011` 取得原幣餘額與近三個月交易。
 外幣帳戶 `sourceId` 為 `bank:ctbc:<末四碼或unknown>:<完整帳號SHA-256>:<幣別>`，`raw` 僅保存末四碼與幣別。
 明確無活存狀態 `9002`／`9004` 視為空清單；外幣查詢要求重新驗證時，原樣傳遞 `CtbcVerificationRequiredError` 並中止本次同步，讓使用者收到驗證提示。其他外幣失敗記固定警告並略過整個外幣區塊，保留舊資料，臺幣與信用卡仍可更新。
+貸款在外幣存款之後查詢「我的貸款」（`TWRBMInvestQU010`）初始化資源 `/twrbm-invest/qu010/010`（body `{}`），讀取 `rsData.ebLoanAcctSummaryP`／`H`／`LA`／`O`：實機回應以 `loanType` 代碼為鍵包裝陣列（例如 `{ "00": [...] }`），沒有貸款時為 `{}` 或 `[]`，因此以數字為鍵的物件與巢狀一層陣列都攤平處理；P 為信用貸款（`loanCategory` = `personal`）、H 為房屋貸款（`housing`），其餘為 `other`。每筆輸出 `loan:ctbc:<loanAcctId SHA-256>` 貸款帳戶（名稱依共用的 `loanAccountName` 規則，`prodType` 寫入 `raw.productName`，`intrstRate` 寫入 `loanInterestRate`）與每日一筆剩餘本金快照：`loanBalAmt` 以負值保存，`pmtAmt` 為 `loanPaymentAmount`，`repayDt` 為 `paymentDueDate`，`loanTerm` 為總期數，已繳期數為總期數減 `remTerm`（缺 `remTerm` 時用 `period`）。raw 只留末四碼、`approveBal`（核貸金額）、總／剩餘期數、利率、`repayDay`、下次應繳日與金額、撥貸日 `loanDt` 與到期日 `expDt`。扣款帳號欄位（`pmtAcctId`／`sordAcctNo`）語意尚未確認，不寫 `autopayAccount`。貸款是附加資料：查詢失敗或任一筆缺帳號／餘額時略過全部貸款並記 `ctbc_loans_skipped`（只含原因代碼），保留舊資料，存款與信用卡照常；要求重新驗證的錯誤照常中止同步。
 信用卡補查帳期與完整分頁；缺日期／金額或分頁資料不完整時失敗。每個幣別一個共用信用卡帳戶，名稱固定為「中國信託信用卡」，帳單與負債維持一份。交易的 `cardLast4` 取自 `cardNoSuffixFour`、`cardNo`、`fullCardNo`，先移除尾端 `_…` 標記，欄位互相矛盾時留空；`cardName` 只在 `cardDataList` 中該末四碼唯一且有卡名時填入。
 帳單 `pmtAmt` 是該結帳區間入帳的繳款，金額對應前一期（`prevBal`），不是本期帳單的已繳金額。較早期別的已繳金額取下一期的 `pmtAmt`，且下一期 `prevBal` 須等於該期 `billAmt`，對不上時繳款狀態為未知；最新一期以 `qu006` 未出帳明細中摘要含「繳款」「扣繳」「自扣」的貸方合計為已繳金額，未取得未出帳明細時為未知。已繳金額達 `billAmt` 即為已繳。
 信用卡負債依共用規則為最新一期帳單應繳（`currPmtAmt`，缺少時用 `billAmt`）扣除上述未出帳繳款後的剩餘應繳，加上 `qu006` 已入帳未結帳明細的淨額；中信未提供已對應的官方總額，因此加總本次完整分頁明細，淨額排除上述繳款貸方，即時授權不計入。剩餘應繳不大於 0 時標記無需繳款。尚無帳單的幣別只計未出帳淨額。
 
-連接器的 `appVer` 使用 `5.2.26`；2026-10-10 核對
+連接器的 `appVer` 使用 `5.2.28`；2026-11-02 核對
 [Google Play 台灣版](https://play.google.com/store/apps/details?id=com.chinatrust.mobilebank&hl=zh_TW&gl=TW)
-與 [App Store 台灣版](https://apps.apple.com/tw/app/id417698185) 的公開最新版均為此版本。
-2026-10-11 靜態核對 [APKMirror 公開分發的 Android 套件](https://www.apkmirror.com/apk/ctbc-bank/china-trust-action-bank/)
-`5.2.26`（build `2026081201`）：`webVer` 使用 `UtilsService.getWebVersion()` 回傳的
-`(0812)`，不以商店更新日期或推測的時間戳代替。
+公開 Android 套件 `AndroidManifest` 為此版本，`webVer` 使用 `UtilsService.getWebVersion()` 回傳的
+`(1020)`，不以商店更新日期或推測的時間戳代替。舊版 `5.2.26`／`(0812)` 查詢「我的貸款」時，
+銀行回 `SVC` `0131`（提醒訊息「請更新至最新版本使用」），因此版本落後會使部分功能失效。
 
 新版 OT044 登入仍使用 `/twrbm-general/ot001/010`，但 `rqData` 除既有欄位外，
-必須傳入 `version: "5.2.26"`、`twoStageVerify: true`、`userAgent` 與
+必須傳入 `version`（與 `appVer` 相同）、`twoStageVerify: true`、`userAgent` 與
 `checkDeviceShare: "Y"`；envelope 的 `appVer` 不能代替登入資料中的 `version`。
 `userAgent` 與 HTTP `User-Agent` 使用符合連接器既有 Android 裝置資訊的 WebView 值。
 
 首次同步在任何銀行請求前產生並以設定版本 CAS 保存 `deviceCode` UUID，
 之後初始化、HTTP header 與 envelope 的 `deviceIxd` 都沿用此識別。
 首次握手後、登入前以相同 CAS 保存銀行發出的 `deviceSeed`，之後握手與所有請求的
-`seed` 皆沿用已保存值，不以新握手或其他回應的 seed 覆蓋。這符合 `5.2.26` 公開套件
+`seed` 皆沿用已保存值，不以新握手或其他回應的 seed 覆蓋。這符合 `5.2.26` 起公開套件
 `main` 的啟動流程：握手前還原本機 seed，只有本機沒有 seed 時才保存 `rsData.seed`。
 保留 seed 可沿用原行銀識別，但不會替未綁定的連接器取得正式 App 的設備認證。
 舊版待核准登入已有 seed 時，接續前搬入 `deviceSeed`，保留這次核准所使用的識別。
@@ -692,6 +693,7 @@ Email、Email 驗證識別或完整銀行回應，也不放入 `sync_cursor`、�
 信用卡 v2 交易由 `sync.ts` 提供 sourceId 的卡號末四碼，再交給共用 preparation 配對待入帳與
 已入帳；跨階段明細序號或名稱不同不影響基本配對，存款、舊交易與摘要帳戶修復沿用既有流程。
 
+- 信用卡帳單應繳金額依序取「累積應繳金額」、「本期應繳總額」、「本期應繳金額」欄位，值為「-」視為 0（無須繳款）；明細表第一列「上期應繳總額」不可當成本期應繳。只有缺少應繳欄位時才以明細淨消費推算（扣除繳款與退款，最低為 0）。銀行新臺幣金額正數為消費（存為負數），負數為繳款／退款（存為正數）。未出帳只有退款或繳款時淨額為 0，仍寫入 0 元快照。交易 sourceId 以金額絕對值組成，沒有序號時同卡同日等額的消費與退款會撞號：消費沿用原 ID，只有撞號的退款／繳款加上 `:credit`。
 - 信用卡未出帳回應只含明確無卡提示時，不再查歷史信用卡帳單，仍解析已取得的存款；其他查詢回應維持既有解析與錯誤處理。
 - 華南登入頁沿用一般導覽：先前 CDP 取樣曾在 1.5 秒內看到 `readyState` 為 `complete`，`USERIDTEXT` 與 `doSubmit` 皆就緒，但遠端 Browser Run 仍可能停在 `chromewebdata/` 錯誤頁。改動登入頁載入方式前必須先以 CDP 取樣確認實際停滯點，不得以推測為依據：`setRequestInterception` 會讓導覽停在 `about:blank`、`setJavaScriptEnabled(false)` 會讓 `waitForFunction`／`evaluate` 失效、`document.write` 移植會摧毀執行環境，三者都已實測不可行。Worker `fetch` 若用於輔助抓取必須設 `AbortSignal.timeout`，否則會在有 proxy 的環境無限等待。導覽的 Puppeteer timeout 外另設 6 秒硬逾時，避免 CDP 操作超時卻持續等待。登入表單或驗證碼沒出現時記導覽狀態及失敗請求的網路錯誤；自動同步在送出登入前依共用政策關閉舊 session 後重開，最多三次準備，耗盡才以連線失敗結束；只有明確的驗證碼錯誤才重試 OCR，不明登入結果不重送帳密。驗證碼準備工作限 35 秒、同步工作限 120 秒，逾時先清理 Browser session 再回報失敗（清理最多另需四秒）；透過 Browser binding 確認遠端 session 已關閉。新建的自動同步 session 使用 60 秒閒置期限，準備人工驗證碼則保留 150 秒。
 - 華南分頁必須常駐 dialog 自動關閉 handler。未預期的 `alert` 會凍結頁面 JavaScript 並使自動化停止回應；送出登入時另有 handler 記錄訊息做成敗分類，兩者並存。
@@ -844,7 +846,7 @@ Email、Email 驗證識別或完整銀行回應，也不放入 `sync_cursor`、�
 
 ### 遠東商銀
 
-> 頁面結構依 2026-10-17 使用者提供的 HAR（登入、密碼變更提醒、帳戶總覽、存款明細、信用卡額度與帳單明細）整理，fixture（`apps/worker/tests/sources/feib/fixtures/`）的帳號、卡號、分行、商店與金額皆為合成值。尚未以真實帳號完成部署後的完整同步；不確定處在程式中以 `TODO(feib-live)` 標示。
+> 頁面結構依 2026-10-17 使用者提供的 HAR（登入、密碼變更提醒、帳戶總覽、存款明細、信用卡額度與帳單明細）整理，fixture（`apps/worker/tests/sources/feib/fixtures/`）的帳號、卡號、分行、商店與金額皆為合成值。2026-11-01 已用真實無卡帳號在 Cloudflare 部署環境完成存款同步。這個帳號的額度頁與帳單頁已製成 fixture；修正版還沒在部署環境執行。持卡帳號還沒在部署環境完成完整同步。不確定處在程式中以 `TODO(feib-live)` 標示。
 
 #### 登入
 
@@ -860,9 +862,19 @@ Email、Email 驗證識別或完整銀行回應，也不放入 `sync_cursor`、�
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 我的存款 `Logon/SvDeposit.jsp`（menu `2-1-1`）           | 「活期性存款」表的帳號、帳戶類別、幣別與餘額；`selFun1(…)` 提供幣別代碼（新臺幣 `00`）。定期性存款不納入。                                                                                                                                                                                                                                                     |
 | 存款交易明細 `SavAcctTxDtlInq`（menu `2-1-3`）           | 帳號選單 `#acct`，以官方 `checkData('A')` 送出。單次期間依官方 `checkDate2` 不超過二個月，同步的近三個月切成不重疊的整日期間。結果表 `交易日期｜帳務日期｜摘要｜支出金額｜存入金額｜帳戶餘額｜備註｜用途`；頁面回顯的帳號與起迄日須與查詢一致。查無交易時沒有結果表格，視為 0 筆。不使用「確認用途」等會寫入銀行端的功能。                                     |
-| 信用卡可用額度 `CCMember/queryCardLimit.jsp`（`5-1-4`）  | 帳單結帳日、本期應繳總額、最低應繳、本期累積已繳金額、繳款截止日與信用額度／已使用／可使用額度。只有移除 HTML 註解後仍出現「未持本行有效卡片」且沒有帳單表時才視為無卡（文案僅以合成 fixture 驗證）。                                                                                                                                                          |
+| 信用卡可用額度 `CCMember/queryCardLimit.jsp`（`5-1-4`）  | 帳單結帳日、本期應繳總額、最低應繳、本期累積已繳金額、繳款截止日與信用額度／已使用／可使用額度。無卡與無資料的處理見表格下方。                                                                                                                                                                                                                                 |
 | 帳單明細 `CCMember/eStatementQry_success.jsp`（`5-1-1`） | 帳單年月選單 `#yyyyMm` 的顯示值為帳單月份（送出值為前一個月）；只送出 `mainForm` 的 `state=eStatementQry`，不呼叫可能進入繳款的 `formSubmit`。結帳日／繳款截止日為民國年；明細只有 `mm/dd`，依結帳日推得年份（晚於結帳日視為前一年）。卡片列「卡號：…末四碼」（全形）切換之後明細的卡號，之前的繳款列以 `account` 代替；沒有消費日的摘要列略過。同步最近三期。 |
 
+- 無卡：移除 HTML 註解後，額度頁仍顯示「未持本行有效卡片」，而且沒有額度表。這段文案只用合成 fixture 驗證。
+- 額度不可得：額度頁只顯示「若您欲查詢信用卡可用額度，請洽本行客服中心」。這不代表無卡。
+  - 帳單選單沒有任何期別，帳單頁也查無帳單時，沒有可同步的信用卡資料。連接器不記失敗；`feib_sync_summary` 的 `cardStatus` 成功與失敗都是 0。
+  - 其他情況記錄額度頁失敗，stage 為 `unavailable`，因為缺少額度就無法建立負債快照。帳單照常建立。
+- 0 期帳單：帳單查詢頁（有 `#yyyyMm` 選單）沒有帳單摘要，`#dateMessage` 顯示「查無帳單資料」時，該頁記為 0 期帳單，不記失敗。存款明細查無交易視為 0 筆，做法相同。
+  - 選單有期別時，必須有選項標明目前期別，否則記失敗。沒有標明時，connector 會把第一個期別當成已顯示的期別，不再查詢。
+  - 實機空帳單頁的選單沒有期別。有期別的空帳單頁只用合成 fixture 驗證。
+- 實機無卡帳號（2026-11-01）的額度頁與帳單頁就是上面兩種畫面。同步不建立信用卡資料，也不記失敗；`hasCreditCard` 保持未定，不斷言無卡。
+- 剩餘風險：持卡人如果額度頁請洽客服，帳單選單又完全沒有期別（例如新卡還沒有第一期帳單），和無卡帳號的畫面相同，也不記失敗。這時沒有帳單可寫入。
+- 這個帳號的「未持本行有效卡片」在 HTML 註解裡。持卡頁面也有同一段註解，所以註解不能當依據。
 - 存款帳戶 sourceId 為 `bank:feib:<末四碼>:<完整帳號 SHA-256 前 16 碼>:<幣別>`，銀行代碼 `805`，已加入直接存款來源。交易 sourceId 由帳號、幣別、交易日期、帳務日期、帶正負號金額、交易後餘額與摘要雜湊並加同一查詢期間內的序號；交易日期存為 `authorizedAt`（只有日期），帳務日期為 `postedDate`；備註中的帳號遮罩為末四碼。
 - 信用卡交易 sourceId 為 `feib:card:tx:v1:<帳單期別>:<卡號末四碼或 account>:<消費日>:<帶正負號金額>:<序號>`；含帳單期別以區分各期分期（原始消費日與金額相同），序號只在同一期帳單內累計，帳單窗口位移時 ID 不變。銀行臺幣金額正數為消費（存為負數），負數為繳款／退款／回饋（存為正數）。目前只有帳單明細（`posted`），未出帳消費尚未接入，因此不接共用授權配對。
 - 繳款狀態：與額度頁結帳日相同的帳單依「本期累積已繳金額」判定；較早期別以下一期的「上期應繳總額」（須等於該期應繳總額）與「已繳款/退款金額」推得，對不上時為未知。已設定自動轉帳且未過截止日為 `autopay_pending`（未繳）；過截止日仍未繳清為 `overdue`。

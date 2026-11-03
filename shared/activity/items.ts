@@ -1,9 +1,10 @@
 import type { ActivityItem } from "./types";
 import { compareActivityItems, isActivityDateTime } from "./list";
-import type {
-  MatchingTransaction,
-  MatchingInvoice,
-  InvoiceTransactionMatches,
+import {
+  invoiceTransactionDayGap,
+  type MatchingTransaction,
+  type MatchingInvoice,
+  type InvoiceTransactionMatches,
 } from "./matching";
 export interface ActivityAccount {
   id: string;
@@ -70,9 +71,13 @@ export function buildActivityItems(
       const hasAuthorizationTime = isActivityDateTime(
         t.authorizedAt ?? undefined,
       );
-      const invoiceTime = isActivityDateTime(matchedInvoice?.invoiceDate)
-        ? matchedInvoice.invoiceDate
-        : undefined;
+      // 跨日手動配對（如延後扣款）沿用扣款日期，月份統計與銀行帳務一致。
+      const invoiceTime =
+        matchedInvoice &&
+        isActivityDateTime(matchedInvoice.invoiceDate) &&
+        invoiceTransactionDayGap(t, matchedInvoice) === 0
+          ? matchedInvoice.invoiceDate
+          : undefined;
       const institutionName =
         t.institutionName ??
         account?.institutionName ??
@@ -156,6 +161,7 @@ export function buildActivityItems(
         amount: t.price === 1 ? undefined : (t.amount ?? undefined),
         currency: t.currency,
         category: "投資",
+        categoryId: "investment",
         status: "已完成",
       };
     }),
