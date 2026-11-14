@@ -9,18 +9,21 @@ import { sanitizeDatabaseError } from "../../db";
 import type { Env } from "../../platform/env";
 import { honoFactory } from "../../platform/hono";
 import { isDemoMode } from "../../platform/http";
+import { monthRangeQuerySchema } from "../../platform/month-range";
 import {
   WRITE_API_METHODS,
   callApi,
   listApiEndpoints,
+  serializeApiResult,
   startSyncs,
   type ApiApp,
   type ApiCallInput,
   type ApiExecutionContext,
 } from "./api";
 import {
+  McpToolInputError,
   getFinancialOverview,
-  getMonthlyCashFlow,
+  getCashFlow,
   getSyncStatus,
   getUpcomingPayments,
   listAccounts,
@@ -49,6 +52,11 @@ async function jsonResult(tool: string, load: () => Promise<unknown>) {
       content: [{ type: "text" as const, text: JSON.stringify(await load()) }],
     };
   } catch (error) {
+    if (error instanceof McpToolInputError)
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: error.message }],
+      };
     const safeError = sanitizeDatabaseError(error);
     console.error(
       JSON.stringify({
@@ -128,25 +136,19 @@ function createServer(
     "get_monthly_cash_flow",
     {
       description:
-        "指定月份的收入、支出總額與各分類金額（新台幣，與 App 活動頁相同計算：發票與刷卡配對不重複計入、排除統計的項目不計、退款沖減支出）。",
-      inputSchema: z.object({
-        month: z
-          .string()
-          .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
-          .optional()
-          .describe("YYYY-MM；省略時為台北時間本月。"),
-      }),
+        "月份的收入、支出總額與各分類金額（新台幣，與 App 活動頁相同計算：發票與刷卡配對不重複計入、排除統計的項目不計、退款沖減支出）。單月以 month（YYYY-MM）指定，全部省略時為台北時間本月；跨月比較或趨勢以 from、to（YYYY-MM，含頭尾，最多 12 個月）一次取得，結果在 months 依月份排列。要看某分類的明細時，以 search_activity 的 category 帶入分類名稱。",
+      inputSchema: monthRangeQuerySchema,
       annotations: READ_ONLY,
     },
-    ({ month }) =>
-      jsonResult("get_monthly_cash_flow", () => getMonthlyCashFlow(db, month)),
+    (input) =>
+      jsonResult("get_monthly_cash_flow", () => getCashFlow(db, input)),
   );
 
   server.registerTool(
     "search_activity",
     {
       description:
-        "以關鍵字搜尋銀行交易、刷卡與電子發票（含品項），關鍵字也會比對使用者寫的交易備註；由新到舊最多回傳 30 筆，note 為備註，truncated 為 true 表示還有更多結果，可縮小日期範圍再查。金額負數為支出。",
+        "列出或搜尋銀行交易、刷卡與電子發票（含品項）。query 為關鍵字，也會比對使用者寫的交易備註；省略 query 時列出日期範圍內的全部活動，須帶 from。category 以分類名稱篩選（名稱見 get_monthly_cash_flow 或結果的 category），例如某月餐飲的明細：category、from、to 加上 flow 為 expense。由新到舊每次最多回傳 30 筆，note 為備註。truncated 為 true 表示還有更多結果：以相同的參數加上 cursor（上一次回傳的 nextCursor）取得下一頁，或縮小日期範圍。金額負數為支出。",
       inputSchema: z
         .object({
           query: z
@@ -154,7 +156,15 @@ function createServer(
             .trim()
             .min(1)
             .max(200)
+            .optional()
             .describe("關鍵字，例如商家、品項、帳戶名稱或備註內容。"),
+          category: z
+            .string()
+            .trim()
+            .min(1)
+            .max(100)
+            .optional()
+            .describe("分類名稱，須與結果的 category 完全相同，例如餐飲。"),
           from: isoDate.optional().describe("起始日期 YYYY-MM-DD（含）。"),
           to: isoDate.optional().describe("結束日期 YYYY-MM-DD（含）。"),
           source: z
@@ -162,10 +172,19 @@ function createServer(
             .optional()
             .describe("bank 為存款帳戶、card 為信用卡、invoice 為電子發票。"),
           flow: z.enum(["all", "income", "expense"]).optional(),
+          cursor: z
+            .string()
+            .max(500)
+            .optional()
+            .describe("上一次回傳的 nextCursor，其他參數須與上一次相同。"),
         })
         .refine(
           (value) => !value.from || !value.to || value.from <= value.to,
           "from 不可晚於 to。",
+        )
+        .refine(
+          (value) => value.query !== undefined || value.from !== undefined,
+          "省略 query 時須帶 from。",
         ),
       annotations: READ_ONLY,
     },
@@ -227,12 +246,19 @@ function createServer(
     "list_api_endpoints",
     {
       description:
-        "列出 query_api 與 call_api 可呼叫的全部網頁版 API 端點、用途與 body 格式，以及資料來源 ID 與帳密欄位。",
+        "列出 query_api 與 call_api 可呼叫的網頁版 API 端點。不帶 resource 時回傳各類別（resource）的端點清單；帶 resource 時回傳該類端點的用途、query 與 body 格式，connectors 另含資料來源 ID 與帳密欄位。",
+      inputSchema: z.object({
+        resource: z
+          .string()
+          .max(50)
+          .optional()
+          .describe("端點類別，為路徑第一段，例如 bank、classification。"),
+      }),
       annotations: READ_ONLY,
     },
-    () =>
+    ({ resource }) =>
       jsonResult("list_api_endpoints", async () =>
-        listApiEndpoints(apiContext.api),
+        listApiEndpoints(apiContext.api, resource),
       ),
   );
 
@@ -251,7 +277,7 @@ function createServer(
     "query_api",
     {
       description:
-        "以 GET 讀取網頁版 API（例如交易、發票、帳單、分類規則、排程與同步狀態），只讀不寫；端點與 query 格式見 list_api_endpoints。回傳 status、分頁 headers 與 JSON body。",
+        "以 GET 讀取網頁版 API（例如交易、發票、帳單、分類規則、排程與同步狀態），只讀不寫；端點與 query 格式見 list_api_endpoints。回傳 status、分頁 headers 與 JSON body；回應過大時回傳 RESPONSE_TOO_LARGE 而不含內容，請以 limit、cursor 分頁或縮小月份範圍。",
       inputSchema: z.object({ path: pathSchema, query: querySchema }),
       annotations: READ_ONLY,
     },
@@ -290,9 +316,10 @@ function createServer(
         apiContext.executionCtx,
         input,
       );
+      const { text, tooLarge } = serializeApiResult(input.method, result);
       return {
-        isError: result.status >= 400,
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        isError: tooLarge || result.status >= 400,
+        content: [{ type: "text" as const, text }],
       };
     } catch (error) {
       const safeError = sanitizeDatabaseError(error);

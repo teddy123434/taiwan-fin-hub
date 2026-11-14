@@ -1,4 +1,5 @@
 import {
+  EMPTY_INVESTMENT_SOURCE_ID,
   activityAmountTwd,
   activityCategoryTotalsTwd,
   activityDateKey,
@@ -10,7 +11,10 @@ import {
   type PaymentReminder,
 } from "@taiwan-fin-hub/shared";
 import { getActivityItemsInRange } from "../activity/service";
-import { searchActivity } from "../activity/search-service";
+import {
+  activitySearchCursorSchema,
+  searchActivity,
+} from "../activity/search-service";
 import { getBankAccounts } from "../bank/service";
 import { getExchangeRates } from "../exchange-rates/service";
 import { getInvestmentPage } from "../investments/service";
@@ -18,6 +22,7 @@ import { getManualAssets } from "../manual-assets/service";
 import { loadPaymentReminders } from "../notifications/service";
 import { calculateCurrentFinancialSnapshot } from "../sync/reports/repository";
 import { getSyncJobs } from "../sync/scheduling/service";
+import { parseKeysetPagination } from "../../platform/http";
 import { resolveMonthDateRange } from "../../platform/month-range";
 
 // MCP 回傳內容會送到使用者選用的 AI 服務：只保留回答問題所需的欄位，
@@ -25,6 +30,9 @@ import { resolveMonthDateRange } from "../../platform/month-range";
 // 畫面相同，可能是銀行交易備註；帳號遮蔽由各來源正規化時負責。
 
 const HOLDINGS_LIMIT = 500;
+
+/** 呼叫端可以自行修正的輸入錯誤；訊息會原樣回給 AI 助理。 */
+export class McpToolInputError extends Error {}
 
 export async function getFinancialOverview(db: D1Database) {
   const snapshot = await calculateCurrentFinancialSnapshot(db);
@@ -71,7 +79,8 @@ export async function listAccounts(db: D1Database) {
 export async function listInvestmentHoldings(db: D1Database) {
   const page = await getInvestmentPage(db, HOLDINGS_LIMIT);
   return {
-    holdings: page.positions.map((position) => ({
+    // 來源沒有持倉時寫入的零值佔位列不是部位，與前端一樣不列出。
+    holdings: page.positions.filter(isHolding).map((position) => ({
       assetType: position.assetType,
       symbol: position.symbol ?? null,
       name: position.name,
@@ -83,6 +92,13 @@ export async function listInvestmentHoldings(db: D1Database) {
     })),
     truncated: page.hasMore,
   };
+}
+
+function isHolding({ sourceId }: { sourceId: string }) {
+  return (
+    sourceId !== EMPTY_INVESTMENT_SOURCE_ID &&
+    !sourceId.startsWith(`${EMPTY_INVESTMENT_SOURCE_ID}:`)
+  );
 }
 
 function shiftMonth(month: string, offset: number) {
@@ -99,14 +115,34 @@ function isCashFlowItem(item: ActivityItem) {
   );
 }
 
+export interface McpCashFlowInput {
+  month?: string;
+  from?: string;
+  to?: string;
+}
+
 /** 與活動頁相同的月收支與分類計算；月份預設為台北時間本月。 */
 export async function getMonthlyCashFlow(db: D1Database, month?: string) {
   const selectedMonth = month ?? taipeiDateKey(new Date()).slice(0, 7);
+  const [result] = await loadCashFlowMonths(db, selectedMonth, selectedMonth);
+  return { currency: "TWD", ...result! };
+}
+
+/** 帶 from、to 時回傳區間內每個月的收支，供跨月比較；否則回傳單月。 */
+export async function getCashFlow(db: D1Database, input: McpCashFlowInput) {
+  if (!input.from || !input.to) return getMonthlyCashFlow(db, input.month);
+  return {
+    currency: "TWD",
+    months: await loadCashFlowMonths(db, input.from, input.to),
+  };
+}
+
+async function loadCashFlowMonths(db: D1Database, from: string, to: string) {
   // 活動頁一次載入多個月份；前後各多讀一個月，讓跨月的發票與刷卡仍能配對，
   // 避免同一筆消費被重複計入支出。
   const range = resolveMonthDateRange({
-    from: shiftMonth(selectedMonth, -1),
-    to: shiftMonth(selectedMonth, 1),
+    from: shiftMonth(from, -1),
+    to: shiftMonth(to, 1),
   })!;
   const [allItems, rateRows] = await Promise.all([
     getActivityItemsInRange(db, range),
@@ -115,56 +151,77 @@ export async function getMonthlyCashFlow(db: D1Database, month?: string) {
   const rates = Object.fromEntries(
     rateRows.map((rate) => [rate.currency, rate.rateTwd]),
   );
-  const items = allItems.filter(
-    (item) =>
-      isCashFlowItem(item) && activityDateKey(item).startsWith(selectedMonth),
-  );
+  const cashFlowItems = allItems.filter(isCashFlowItem);
   const round = (value: number) => Math.round(value);
-  return {
-    month: selectedMonth,
-    currency: "TWD",
-    income: round(activityFlowTotalTwd(items, "income", rates)),
-    expense: round(activityFlowTotalTwd(items, "expense", rates)),
-    expenseByCategory: activityCategoryTotalsTwd(items, "expense", rates).map(
-      ({ category, amount }) => ({ category, amount: round(amount) }),
-    ),
-    incomeByCategory: activityCategoryTotalsTwd(items, "income", rates).map(
-      ({ category, amount }) => ({ category, amount: round(amount) }),
-    ),
-    missingExchangeRateCurrencies: [
-      ...new Set(
-        items
-          .filter(
-            (item) =>
-              !item.excludedFromCalculation &&
-              item.amount != null &&
-              activityAmountTwd(item, rates) == null,
-          )
-          .map((item) => item.currency),
+  const months = [];
+  for (let month = from; month <= to; month = shiftMonth(month, 1)) {
+    const items = cashFlowItems.filter((item) =>
+      activityDateKey(item).startsWith(month),
+    );
+    months.push({
+      month,
+      income: round(activityFlowTotalTwd(items, "income", rates)),
+      expense: round(activityFlowTotalTwd(items, "expense", rates)),
+      expenseByCategory: activityCategoryTotalsTwd(items, "expense", rates).map(
+        ({ category, amount }) => ({ category, amount: round(amount) }),
       ),
-    ].sort(),
-  };
+      incomeByCategory: activityCategoryTotalsTwd(items, "income", rates).map(
+        ({ category, amount }) => ({ category, amount: round(amount) }),
+      ),
+      missingExchangeRateCurrencies: [
+        ...new Set(
+          items
+            .filter(
+              (item) =>
+                !item.excludedFromCalculation &&
+                item.amount != null &&
+                activityAmountTwd(item, rates) == null,
+            )
+            .map((item) => item.currency),
+        ),
+      ].sort(),
+    });
+  }
+  return months;
 }
 
 export interface McpActivitySearchInput {
-  query: string;
+  query?: string;
+  category?: string;
   from?: string;
   to?: string;
   source?: "all" | "bank" | "card" | "invoice";
   flow?: "all" | "income" | "expense";
+  cursor?: string;
+}
+
+function parseSearchCursor(cursor: string | undefined) {
+  if (!cursor) return undefined;
+  try {
+    return parseKeysetPagination({ cursor }, activitySearchCursorSchema).cursor;
+  } catch {
+    throw new McpToolInputError(
+      "cursor 無效，請使用上一次 search_activity 回傳的 nextCursor。",
+    );
+  }
 }
 
 export async function searchActivities(
   db: D1Database,
   input: McpActivitySearchInput,
 ) {
-  const result = await searchActivity(db, {
-    q: input.query,
-    from: input.from,
-    to: input.to,
-    source: input.source,
-    flow: input.flow,
-  });
+  const result = await searchActivity(
+    db,
+    {
+      q: input.query ?? "",
+      categoryLabel: input.category,
+      from: input.from,
+      to: input.to,
+      source: input.source,
+      flow: input.flow,
+    },
+    parseSearchCursor(input.cursor),
+  );
   return {
     items: result.items.map((item) => ({
       date: activityDateKey(item),
@@ -181,6 +238,7 @@ export async function searchActivities(
       status: item.status,
     })),
     truncated: Boolean(result.nextCursor),
+    nextCursor: result.nextCursor,
   };
 }
 
