@@ -22,6 +22,7 @@
     manualAssetsQuery,
   } from "@/data/assets/queries";
   import type { ManualAssetRow } from "@/data/assets/types";
+  import { isSettledManualAsset } from "./model/summary";
   import {
     formatCurrency,
     formatDate,
@@ -53,6 +54,7 @@
     assetName: string;
     date: string;
   } | null>(null);
+  let showSettled = $state(false);
   let formError = $state("");
   let editorDialog = $state<HTMLDivElement>();
   let deleteDialog = $state<HTMLDivElement>();
@@ -72,6 +74,15 @@
     other: "其他",
   };
   const currencies = ["TWD", "USD", "JPY", "EUR"] as const;
+  const activeAssets = $derived(
+    (assets.data ?? []).filter((asset) => !isSettledManualAsset(asset)),
+  );
+  const settledAssets = $derived(
+    (assets.data ?? []).filter(isSettledManualAsset),
+  );
+  // type="number" 的輸入清空後是 null、未輸入時是空字串；0 是有效估值（例如投資到期回收）。
+  const hasAmount = (value: string | number | null | undefined) =>
+    value !== "" && value != null && Number.isFinite(Number(value));
   const rateValues = $derived(
     Object.fromEntries(
       (rates.data ?? []).map((rate) => [rate.currency, rate.rateTwd]),
@@ -105,8 +116,6 @@
         category: form.category,
         currency: form.currency,
         note: form.note || null,
-        value: Number(form.value),
-        date: form.date,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.manualAssets });
@@ -116,7 +125,8 @@
   }));
   const remove = createMutation(() => ({
     mutationFn: (id: string) => api.delete(`/api/manual-assets/${id}`),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      if (expandedAssetId === id) expandedAssetId = null;
       qc.invalidateQueries({ queryKey: queryKeys.manualAssets });
       qc.invalidateQueries({ queryKey: queryKeys.netWorthHistory });
       closeDeleteConfirmation();
@@ -246,7 +256,12 @@
     restoreFocus();
   }
   function submit() {
-    if (!form.name.trim() || !form.value) {
+    if (!form.name.trim()) {
+      formError = "請輸入資產名稱。";
+      return;
+    }
+    // 編輯只改基本資料；估值在展開區更新，才會留下估值歷史。
+    if (!editing && !hasAmount(form.value)) {
       formError = "請輸入資產名稱與目前估值。";
       return;
     }
@@ -268,14 +283,15 @@
     historyDate = todayStr();
     editingHistoryDate = null;
   }
-  function toggleHistoryManagement() {
-    if (expandedAssetId) {
+  // 展開中的資產收進收合的「已結清」後就看不到了，一併清掉展開狀態，
+  // 否則之後打開「已結清」時它會自己展開著。
+  $effect(() => {
+    if (
+      !showSettled &&
+      settledAssets.some((asset) => asset.id === expandedAssetId)
+    )
       expandedAssetId = null;
-      return;
-    }
-    const firstAsset = assets.data?.[0];
-    if (firstAsset) toggleHistory(firstAsset.id);
-  }
+  });
 
   onMount(() => {
     const handleKeydown = (event: KeyboardEvent) => {
@@ -320,16 +336,6 @@
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
-          {#if variant === "embedded"}
-            <Button
-              class="hidden md:inline-flex"
-              variant="secondary"
-              disabled={(assets.data ?? []).length === 0}
-              onclick={toggleHistoryManagement}
-            >
-              {expandedAssetId ? "收起估值歷史" : "管理估值歷史"}
-            </Button>
-          {/if}
           <Button variant="primary" onclick={openAdd}
             ><Plus class="size-4" />新增資產</Button
           >
@@ -349,51 +355,74 @@
           {#if (assets.data ?? []).length === 0}
             <p class="p-8 text-center text-sm text-subtle">尚無其他資產。</p>
           {:else}
-            {#each assets.data ?? [] as asset (asset.id)}
+            {#snippet assetRow(asset: ManualAssetRow)}
+              {@const expanded = expandedAssetId === asset.id}
               <div class={hideSummary ? "" : "px-5 py-4"}>
-                <div class="flex items-center gap-1">
-                  <button
-                    class="grid min-h-[72px] min-w-0 flex-1 cursor-pointer grid-cols-[minmax(0,1fr)_auto_16px] items-center gap-3 py-2 text-left transition hover:bg-ink/3"
-                    onclick={() => toggleHistory(asset.id)}
-                    aria-expanded={expandedAssetId === asset.id}
-                    aria-label={`${asset.name}，估值歷史`}
-                  >
-                    <span class="min-w-0">
-                      <strong class="block truncate text-sm"
-                        >{asset.name}</strong
-                      >
+                <button
+                  class="grid min-h-[72px] w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto_16px] items-center gap-3 py-2 text-left transition hover:bg-ink/3"
+                  onclick={() => toggleHistory(asset.id)}
+                  aria-expanded={expanded}
+                  aria-label={`${asset.name}，估值歷史`}
+                >
+                  <span class="min-w-0">
+                    <strong class="block truncate text-sm">{asset.name}</strong>
+                    <small class="mt-1 block truncate text-caption text-subtle">
+                      {categories[asset.category as keyof typeof categories] ??
+                        asset.category} · {asset.currency} · {asset.date
+                        ? formatDate(asset.date)
+                        : "尚未估值"}
+                    </small>
+                    {#if asset.note && !expanded}
                       <small
-                        class="mt-1 block truncate text-caption text-subtle"
+                        class="mt-1 line-clamp-2 text-caption break-words whitespace-pre-line text-subtle"
                       >
-                        {categories[
-                          asset.category as keyof typeof categories
-                        ] ?? asset.category} · {asset.currency} · {asset.date
-                          ? formatDate(asset.date)
-                          : "尚未估值"}{asset.note ? ` · ${asset.note}` : ""}
+                        {asset.note}
                       </small>
-                    </span>
-                    <strong class="text-sm font-medium tabular-nums">
-                      {formatCurrency(asset.value ?? 0, asset.currency)}
-                    </strong>
-                    <ChevronRight
-                      class={`size-4 text-subtle transition ${expandedAssetId === asset.id ? "rotate-90" : ""}`}
-                    />
-                  </button>
-                  <button
-                    class="rounded-sm p-1 text-subtle hover:text-steel"
-                    aria-label="編輯資產"
-                    onclick={() => startEdit(asset)}
-                    ><Pencil class="size-4" /></button
-                  ><button
-                    class="rounded-sm p-1 text-subtle hover:text-coral"
-                    aria-label="刪除資產"
-                    onclick={() => requestDeleteAsset(asset)}
-                    ><Trash2 class="size-4" /></button
-                  >
-                </div>
-                {#if expandedAssetId === asset.id}
-                  <div class="mt-4 rounded-lg bg-paper/70 p-3">
-                    <div class="flex items-center justify-between">
+                    {/if}
+                  </span>
+                  <strong class="text-sm font-medium tabular-nums">
+                    {formatCurrency(asset.value ?? 0, asset.currency)}
+                  </strong>
+                  <ChevronRight
+                    class={`size-4 text-subtle transition ${expanded ? "rotate-90" : ""}`}
+                  />
+                </button>
+                {#if expanded}
+                  <div class="mt-2 rounded-lg bg-paper/70 p-3">
+                    {#if asset.note}
+                      <p
+                        class="mb-3 border-b border-ink/8 pb-3 text-sm leading-6 break-words whitespace-pre-line text-subtle"
+                      >
+                        {asset.note}
+                      </p>
+                    {/if}
+                    <div class="flex flex-wrap items-end gap-2">
+                      <label class="grid gap-1 text-caption text-subtle"
+                        >估值（{asset.currency}）<Input
+                          class="w-32"
+                          type="number"
+                          inputmode="decimal"
+                          bind:value={historyValue}
+                        /></label
+                      ><label class="grid gap-1 text-caption text-subtle"
+                        >日期<Input
+                          type="date"
+                          bind:value={historyDate}
+                        /></label
+                      ><Button
+                        disabled={!hasAmount(historyValue) ||
+                          addHistory.isPending}
+                        onclick={() =>
+                          addHistory.mutate({
+                            assetId: asset.id,
+                            value: Number(historyValue),
+                            date: historyDate,
+                          })}>更新估值</Button
+                      >
+                    </div>
+                    <div
+                      class="mt-4 flex items-center justify-between border-t border-ink/8 pt-3"
+                    >
                       <h3 class="text-sm font-semibold">估值歷史</h3>
                       <span class="text-caption text-subtle"
                         >{(history.data ?? []).length} 筆</span
@@ -418,10 +447,12 @@
                                 <Input
                                   class="h-8 w-28 px-2 py-1"
                                   type="number"
+                                  inputmode="decimal"
                                   bind:value={editingHistoryValue}
                                 /><Button
                                   size="sm"
                                   variant="ghost"
+                                  disabled={!hasAmount(editingHistoryValue)}
                                   onclick={() =>
                                     editHistory.mutate({
                                       assetId: asset.id,
@@ -435,7 +466,7 @@
                                   >取消</Button
                                 >
                               </div>{:else}<div class="flex items-center gap-2">
-                                <span class="font-medium"
+                                <span class="font-medium tabular-nums"
                                   >{formatCurrency(
                                     entry.value,
                                     asset.currency,
@@ -464,34 +495,45 @@
                       </div>
                     {/if}
                     <div
-                      class="mt-3 flex flex-wrap items-end gap-2 border-t border-ink/8 pt-3"
+                      class="mt-3 flex items-center justify-between gap-2 border-t border-ink/8 pt-3"
                     >
-                      <label class="grid gap-1 text-caption text-subtle"
-                        >估值（{asset.currency}）<Input
-                          class="w-32"
-                          type="number"
-                          bind:value={historyValue}
-                        /></label
-                      ><label class="grid gap-1 text-caption text-subtle"
-                        >日期<Input
-                          type="date"
-                          bind:value={historyDate}
-                        /></label
-                      ><Button
+                      <Button
                         size="sm"
-                        disabled={!historyValue || addHistory.isPending}
-                        onclick={() =>
-                          addHistory.mutate({
-                            assetId: asset.id,
-                            value: Number(historyValue),
-                            date: historyDate,
-                          })}><Plus class="size-4" />新增估值</Button
+                        variant="ghost"
+                        onclick={() => startEdit(asset)}
+                        ><Pencil class="size-4" />編輯資產</Button
+                      ><Button
+                        class="text-coral hover:text-coral"
+                        size="sm"
+                        variant="ghost"
+                        onclick={() => requestDeleteAsset(asset)}
+                        ><Trash2 class="size-4" />刪除資產</Button
                       >
                     </div>
                   </div>
                 {/if}
               </div>
+            {/snippet}
+            {#each activeAssets as asset (asset.id)}
+              {@render assetRow(asset)}
             {/each}
+            {#if settledAssets.length > 0}
+              <button
+                class={`flex w-full cursor-pointer items-center gap-2 py-3 text-left text-sm text-subtle transition hover:bg-ink/3 ${hideSummary ? "" : "px-5"}`}
+                aria-expanded={showSettled}
+                onclick={() => (showSettled = !showSettled)}
+              >
+                <ChevronRight
+                  class={`size-4 transition ${showSettled ? "rotate-90" : ""}`}
+                />
+                已結清（{settledAssets.length}）
+              </button>
+              {#if showSettled}
+                {#each settledAssets as asset (asset.id)}
+                  {@render assetRow(asset)}
+                {/each}
+              {/if}
+            {/if}
           {/if}
         </div>
       </CardContent>
@@ -522,28 +564,38 @@
           <div class="mt-5 grid gap-3">
             <label class="grid gap-1 text-sm"
               >名稱<Input required bind:value={form.name} /></label
-            ><label class="grid gap-1 text-sm"
-              >類別<Select bind:value={form.category}
-                >{#each Object.entries(categories) as [key, label] (key)}<option
-                    value={key}>{label}</option
-                  >{/each}</Select
-              ></label
-            ><label class="grid gap-1 text-sm"
-              >幣別<Select bind:value={form.currency}
-                >{#each currencies as currency (currency)}<option
-                    value={currency}>{currency}</option
-                  >{/each}</Select
-              ></label
-            ><label class="grid gap-1 text-sm"
-              >目前估值<Input
-                required
-                type="number"
-                bind:value={form.value}
-              /></label
-            ><label class="grid gap-1 text-sm"
-              >估值日期<Input type="date" bind:value={form.date} /></label
-            ><label class="grid gap-1 text-sm"
-              >備註<Textarea rows="2" bind:value={form.note} /></label
+            >
+            <div class="grid grid-cols-2 gap-3">
+              <label class="grid gap-1 text-sm"
+                >類別<Select bind:value={form.category}
+                  >{#each Object.entries(categories) as [key, label] (key)}<option
+                      value={key}>{label}</option
+                    >{/each}</Select
+                ></label
+              ><label class="grid gap-1 text-sm"
+                >幣別<Select bind:value={form.currency}
+                  >{#each currencies as currency (currency)}<option
+                      value={currency}>{currency}</option
+                    >{/each}</Select
+                ></label
+              >
+            </div>
+            {#if !editing}
+              <div class="grid grid-cols-2 gap-3">
+                <label class="grid gap-1 text-sm"
+                  >目前估值<Input
+                    required
+                    type="number"
+                    inputmode="decimal"
+                    bind:value={form.value}
+                  /></label
+                ><label class="grid gap-1 text-sm"
+                  >估值日期<Input type="date" bind:value={form.date} /></label
+                >
+              </div>
+            {/if}
+            <label class="grid gap-1 text-sm"
+              >備註<Textarea rows="3" bind:value={form.note} /></label
             >
             {#if formError}<p
                 class="text-sm font-medium text-coral"
