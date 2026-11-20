@@ -5,6 +5,8 @@ export const queryKeys = {
   bank: ["bank"] as const,
   bankAccounts: ["bank", "accounts"] as const,
   bankRange: (from: string, to: string) => ["bank", "range", from, to] as const,
+  bankTransactions: (ids: readonly string[]) =>
+    ["bank", "transactions", ...ids] as const,
   bills: ["creditCardBills"] as const,
   billsRange: (from: string, to: string) =>
     ["creditCardBills", "range", from, to] as const,
@@ -33,6 +35,7 @@ export const queryKeys = {
   classificationCategories: ["classification-categories"] as const,
   classificationRules: ["classification-rules"] as const,
   aiClassification: ["ai-classification"] as const,
+  mcpAuthStatus: ["mcp-auth-status"] as const,
   connectorSettings: (id: string) => ["connector-settings", id] as const,
   manualAssetHistory: (id: string) => ["manualAssetHistory", id] as const,
 };
