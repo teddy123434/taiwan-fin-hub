@@ -56,7 +56,9 @@ apps/web/src/
 
 ## 關於與組建資訊
 
-「更新紀錄」入口位於桌面側欄底部、窄版桌面的上方導覽列，以及手機的「更多」頁。平時顯示目前版號，有較新版時以強調色顯示新版版號。點選入口會開啟對話框，桌面置中，手機面板貼齊底部、高度接近全螢幕。清單列出所有版本，標示目前版本與可用新版，預設展開最新一版。較舊的版本可逐一展開。
+「更新紀錄」入口位於桌面側欄底部、窄版桌面的上方導覽列，以及手機的「更多」頁。平時顯示目前版號，有較新版時以強調色顯示新版版號；手機版另在底部導覽的「更多」加上紅點，在首頁也看得到。點選入口會開啟對話框，桌面置中，手機面板貼齊底部、高度接近全螢幕。清單列出所有版本，標示目前版本與可用新版，預設展開最新一版。較舊的版本可逐一展開。
+
+有新版時，對話框依 `__BUILD_INFO__.updateMethod` 顯示更新方式。`cloudflare`（重新部署即取得最新版本）顯示 Retry build 步驟與「前往 Cloudflare 更新」連結；Worker 沒有啟動 build 的權限，網站內無法直接更新。`features/settings/model/release-update.ts` 從 `workers.dev` 網址的第一段取得 Worker 名稱並連到其 Deployments 頁，自訂網域時改開 Workers & Pages 列表。`repository`（由部署 repository 管理版本）只提示從 GitHub 更新；本機建置不顯示。
 
 `data/releases/queries.ts` 匯入根目錄的 `releases.json` 作為隨組建提供的紀錄。App 啟動時查詢上游的公開紀錄，所有入口使用同一份 TanStack Query 結果，成功結果保有六小時的查詢有效期。清單依版號數字由新到舊排序，每個版號只列一次，同版號優先採用上游摘要。離線或查詢失敗時仍可閱讀隨組建提供的紀錄。
 
@@ -68,7 +70,7 @@ apps/web/src/
 桌面「設定 → AI 助理」與手機「更多 → AI 助理（MCP）」皆開啟 `#/ai-assistant`。第一張卡片只顯示 MCP 是否可以使用，尚未啟用或無法確認時列出 Managed OAuth 的啟用步驟；其後是「連接 AI 助理」、範例問題與隱私說明，端點網址以 `location.origin` 組出並帶入提示詞與步驟。
 Codex、Claude Code 與「其他」提供設定提示詞：貼給能執行指令的 AI 助理，由它新增伺服器、引導瀏覽器授權並呼叫 `whoami` 確認，頁面只列出使用者仍需親自處理的事；「其他」另附助理無法自行修改設定時的手動步驟。ChatGPT 必須在其網頁介面新增並把回呼網址加入 Access，因此只列手動步驟。
 啟用步驟、提示詞、手動步驟、截圖、範例問題與疑難排解集中於 `features/settings/model/mcp.ts`，內容須與 `docs/006-mcp.md` 一致，調整任一處時同步更新另一處。
-啟用步驟與 ChatGPT、「其他」加回呼網址的步驟附上 Cloudflare Applications 列表的深層連結（`CLOUDFLARE_ACCESS_APPS_URL`，與 Cloudflare 官方文件相同）；沒有 Application 的內部 ID，無法直接開到單一 Application。
+啟用步驟與 ChatGPT、「其他」加回呼網址的步驟附上 Cloudflare Applications 列表的深層連結（`CLOUDFLARE_ACCESS_APPS_URL`，`/one/access-controls/apps`）；路徑取自目前主控台的網址，Cloudflare 官方文件仍使用的 `/one/access/apps` 已找不到頁面，主控台改版時需重新確認。沒有 Application 的內部 ID，無法直接開到單一 Application。
 說明盡量在 App 內呈現，不連到外部網站：設定截圖由根目錄 `images/` 匯入，與 006 文件共用同一批檔案，收合在對應步驟下方，展開後才下載，點擊可開啟原尺寸；常見連線問題收在「連線失敗時」；撤銷授權寫在隱私說明。只有 Demo 模式無法在 App 內設定，才連到上游文件。
 
 Managed OAuth 檢查位於 `features/settings/model/mcp-auth.ts`：以 `credentials: "omit"`、`redirect: "manual"` 對 `/mcp` 送出 POST，模擬尚未登入的 AI 助理，與文件的 `curl` 檢查相同。
